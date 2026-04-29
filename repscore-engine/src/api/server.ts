@@ -1,14 +1,10 @@
-// ============================================================
-// RepScore Engine — API Server
-// REST endpoints for repscore.xyz
-// ============================================================
-
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import { computeRepScore } from "../engine.ts";
 import { getCachedScore, setCachedScore, bustCache, getCacheStats } from "../cache.ts";
 import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
+import { webhookRouter } from "./webhook.ts";
 
 const app = express();
 app.use(express.json());
@@ -172,7 +168,8 @@ app.post("/v1/score/:wallet/refresh", requireApiKey, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
-
+// ── Webhook routes ────────────────────────────────────────────
+app.use("/webhooks", webhookRouter);
 // ── 404 Handler ───────────────────────────────────────────────
 
 app.use((_req, res) => {
