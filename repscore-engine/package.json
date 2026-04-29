@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/api/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "npm install --save-dev @types/node && tsc",
     "start": "node dist/api/server.js",
     "dev": "tsx watch src/api/server.ts",
     "score": "tsx src/cli.ts"
