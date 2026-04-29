@@ -6,9 +6,9 @@
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
-import { computeRepScore } from "./engine.js";
-import { getCachedScore, setCachedScore, bustCache, getCacheStats } from "./cache.js";
-import { ScoreResponse, BatchScoreResponse } from "./types/index.js";
+import { computeRepScore } from "../engine.ts";
+import { getCachedScore, setCachedScore, bustCache, getCacheStats } from "../cache.ts";
+import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
 
 const app = express();
 app.use(express.json());
