@@ -113,7 +113,32 @@ export async function getTokensDeployedBy(wallet: string): Promise<string[]> {
 
 export async function getTokenHolderCount(mint: string): Promise<number> {
   const result = await rpcCall("getTokenLargestAccounts", [mint]);
-  return result?.value?.length ?? 0;
+  const accounts = result?.value ?? [];
+
+  // Filter out dust holders and bots
+  // Only count wallets holding at least 0.01% of supply
+  // and exclude known burn/system addresses
+  const BURN_ADDRESSES = [
+    "1nc1nerator11111111111111111111111111111111",
+    "So11111111111111111111111111111111111111112",
+  ];
+
+  // Get total supply to calculate percentages
+  const totalAmount = accounts.reduce(
+    (sum: number, a: any) => sum + parseFloat(a.uiAmount || 0), 0
+  );
+
+  if (totalAmount === 0) return 0;
+
+  const MIN_HOLDING_PCT = 0.0001; // 0.01% minimum to count as real holder
+
+  const realHolders = accounts.filter((a: any) => {
+    if (BURN_ADDRESSES.includes(a.address)) return false;
+    const pct = parseFloat(a.uiAmount || 0) / totalAmount;
+    return pct >= MIN_HOLDING_PCT;
+  });
+
+  return realHolders.length;
 }
 
 export async function getTokenMetadata(mint: string): Promise<{
