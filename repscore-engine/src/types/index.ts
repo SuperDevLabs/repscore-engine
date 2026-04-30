@@ -1,5 +1,5 @@
 // ============================================================
-// RepScore Engine — Core Types
+// RepScore Engine — Core Types (pump.fun native v2)
 // repscore.xyz
 // ============================================================
 
@@ -9,6 +9,123 @@ export type ScoreTier =
   | "ESTABLISHED"
   | "UNPROVEN"
   | "FLAGGED"
+  | "BLACKLISTED";
+
+export type WalletRole = "DEV" | "TRADER" | "BOTH" | "UNKNOWN";
+
+export interface RepScore {
+  wallet: string;
+  score: number;
+  tier: ScoreTier;
+  role: WalletRole;
+  components: ScoreComponents;
+  flags: ScoreFlag[];
+  metadata: ScoreMetadata;
+  cachedAt: string;
+}
+
+export interface ScoreComponents {
+  launchHistory:     ComponentScore; // 30%
+  liquidityBehavior: ComponentScore; // 25%
+  holderRetention:   ComponentScore; // 20%
+  communitySignals:  ComponentScore; // 15%
+  walletHistory:     ComponentScore; // 10%
+}
+
+export interface ComponentScore {
+  raw: number;
+  weighted: number;
+  weight: number;
+  signals: string[];
+}
+
+export interface ScoreFlag {
+  severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
+  code: string;
+  description: string;
+  detectedAt?: string;
+}
+
+export interface ScoreMetadata {
+  totalLaunches: number;
+  successfulLaunches: number;
+  rugCount: number;
+  graduatedCount: number;
+  avgLongevityHours: number;
+  avgHolderRetention7d: number;
+  avgHolderRetention30d: number;
+  walletAgeDays: number;
+  totalVolumeSol: number;
+  lastActivityAt: string;
+}
+
+// ── TokenLaunch — pump.fun native ────────────────────────────
+
+export interface TokenLaunch {
+  mint: string;
+  deployer: string;
+  deployedAt: number;
+
+  // Longevity
+  lastActivityAt: number;
+  survivedHours: number;
+  graduated: boolean;
+
+  // Dev token lock (Streamflow / Realms — voluntary)
+  devTokensLocked: boolean;
+  devLockDays: number | null;          // how long tokens are locked
+  devLockPct: number | null;           // what % of dev allocation is locked
+  devSoldBeforeLockExpiry: boolean;    // dumped before lock expired
+
+  // Dev wallet behavior
+  devAllocationPct: number;
+  devFirstSellHours: number | null;
+  devSoldPct50InFirstHour: boolean;
+  selfSniped: boolean;
+
+  // Post-graduation LP (Raydium — dev CAN control this)
+  postGradLpLocked: boolean;           // locked Raydium LP after graduation
+  postGradLpLockDays: number | null;
+  postGradLpPulled: boolean;
+  postGradLpPulledHours: number | null;
+
+  // Holders
+  peakHolders: number;
+  holders7d: number;
+  holders30d: number;
+  holders90d: number;
+
+  // On-chain hygiene
+  mintRenounced: boolean;
+  freezeAuthorityRevoked: boolean;
+  telegramDeleted: boolean;
+}
+
+// ── API types ─────────────────────────────────────────────────
+
+export interface ScoreRequest {
+  wallet: string;
+  forceRefresh?: boolean;
+}
+
+export interface ScoreResponse {
+  success: boolean;
+  data?: RepScore;
+  error?: string;
+  fromCache?: boolean;
+}
+
+export interface BatchScoreRequest {
+  wallets: string[];
+  forceRefresh?: boolean;
+}
+
+export interface BatchScoreResponse {
+  success: boolean;
+  results: Record<string, ScoreResponse>;
+  errors: Record<string, string>;
+}
+
   | "BLACKLISTED";
 
 export type WalletRole = "DEV" | "TRADER" | "BOTH" | "UNKNOWN";
