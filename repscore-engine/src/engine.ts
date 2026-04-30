@@ -141,23 +141,42 @@ async function buildLaunchRecord(
     ? (devTxns[devTxns.length - 2].timestamp - deployedAt) / 3600
     : null;
 
+  const isGraduated = lpData.stillActive && lpData.initialLpSol > 10;
+
   return {
     mint,
     deployer,
     deployedAt,
     lastActivityAt,
     survivedHours: Math.max(0, survivedHours),
-    graduated: lpData.stillActive && lpData.initialLpSol > 10, // Raydium graduation proxy
-    devAllocationPct: 5,      // default — refine with supply analysis
+    graduated: isGraduated,
+
+    // Dev token locks — requires Streamflow/Realms indexer
+    // Defaulted to false until lock detection is implemented
+    devTokensLocked: false,
+    devLockDays: null,
+    devLockPct: null,
+    devSoldBeforeLockExpiry: false,
+
+    // Dev wallet behavior
+    devAllocationPct: 5,            // default — refine with supply analysis
     devFirstSellHours,
     devSoldPct50InFirstHour: false, // refine with wallet tx analysis
     selfSniped: false,              // refine with bundle detection
-    postGradLpPulled: rugData.wasRugged && lpData.initialLpSol > 10,
+
+    // Post-graduation Raydium LP
+    postGradLpLocked: false,        // refine with Raydium LP lock indexer
+    postGradLpLockDays: null,
+    postGradLpPulled: rugData.wasRugged && isGraduated,
     postGradLpPulledHours: rugData.wasRugged ? 24 : null,
+
+    // Holders
     peakHolders: holderCount,
     holders7d: Math.round(holderCount * 0.6),
     holders30d: Math.round(holderCount * 0.3),
     holders90d: Math.round(holderCount * 0.15),
+
+    // On-chain hygiene
     mintRenounced: tokenMeta.mintRenounced,
     freezeAuthorityRevoked: tokenMeta.freezeAuthorityRevoked,
     telegramDeleted: false, // requires social indexer
