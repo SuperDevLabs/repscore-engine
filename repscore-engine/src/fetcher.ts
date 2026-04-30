@@ -36,10 +36,35 @@ export async function getWalletSignatures(
 
 export async function getWalletAge(wallet: string): Promise<number> {
   // Returns age in days based on first transaction
-  const result = await rpcCall("getSignaturesForAddress", [
-    wallet,
-    { limit: 1000, commitment: "finalized" },
-  ]);
+export async function getWalletAge(wallet: string): Promise<number> {
+  let lastSignature: string | undefined;
+  let oldestBlockTime: number | null = null;
+  const MAX_PAGES = 10; // look back up to 10,000 transactions
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const params: any = { limit: 1000, commitment: "finalized" };
+    if (lastSignature) params.before = lastSignature;
+
+    const result = await rpcCall("getSignaturesForAddress", [wallet, params]);
+    if (!result || result.length === 0) break;
+
+    // Oldest in this batch is the last item
+    const oldest = result[result.length - 1];
+    if (oldest.blockTime) oldestBlockTime = oldest.blockTime;
+
+    // If we got fewer than 1000 we've reached the beginning
+    if (result.length < 1000) break;
+
+    // Continue paginating
+    lastSignature = oldest.signature;
+
+    // Small delay to avoid rate limiting
+    await new Promise(r => setTimeout(r, 150));
+  }
+
+  if (!oldestBlockTime) return 0;
+  return Math.floor((Date.now() / 1000 - oldestBlockTime) / 86400);
+}
   if (!result || result.length === 0) return 0;
   // Last item = oldest signature
   const oldest = result[result.length - 1];
