@@ -34,8 +34,7 @@ export async function getWalletSignatures(
   return (result || []).map((s: any) => s.signature);
 }
 
-export async function getWalletAge(wallet: string): Promise<number> {
-  // Returns age in days based on first transaction
+
 export async function getWalletAge(wallet: string): Promise<number> {
   let lastSignature: string | undefined;
   let oldestBlockTime: number | null = null;
