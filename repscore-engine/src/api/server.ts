@@ -186,8 +186,8 @@ app.post("/v1/score/:wallet/refresh", requireApiKey, async (req, res) => {
 });
 // ── Webhook routes ────────────────────────────────────────────
 app.use("/webhooks", webhookRouter);
+
 // ── Analytics — recent lookups ────────────────────────────────
-// Internal only — shows recent wallet lookup patterns
 const lookupLog: any[] = [];
 const MAX_LOG = 500;
 
@@ -222,23 +222,8 @@ function getTopIps(log: any[]) {
     .slice(0, 10)
     .map(([ip, count]) => ({ ip, count }));
 }
-app.get("/internal/lookups", async (req, res) => {
-  const secret = req.headers["x-internal-secret"];
-  if (secret !== process.env.INTERNAL_SECRET) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-  res.json({
-    total: lookupLog.length,
-    recent: lookupLog.slice(-50),
-    topWallets: getTopWallets(lookupLog),
-    topIps: getTopIps(lookupLog),
-  });
-});
 
 // ── 404 Handler ───────────────────────────────────────────────
-// ── 404 Handler ───────────────────────────────────────────────
-
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
 });
