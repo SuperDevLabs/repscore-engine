@@ -184,6 +184,42 @@ app.post("/v1/score/:wallet/refresh", requireApiKey, async (req, res) => {
 });
 // ── Webhook routes ────────────────────────────────────────────
 app.use("/webhooks", webhookRouter);
+// ── Analytics — recent lookups ────────────────────────────────
+// Internal only — shows recent wallet lookup patterns
+const lookupLog: any[] = [];
+const MAX_LOG = 500;
+
+app.get("/internal/lookups", async (req, res) => {
+  const secret = req.headers["x-internal-secret"];
+  if (secret !== process.env.INTERNAL_SECRET) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  res.json({
+    total: lookupLog.length,
+    recent: lookupLog.slice(-50),
+    topWallets: getTopWallets(lookupLog),
+    topIps: getTopIps(lookupLog),
+  });
+});
+
+function getTopWallets(log: any[]) {
+  const counts: Record<string, number> = {};
+  log.forEach(l => counts[l.wallet] = (counts[l.wallet] || 0) + 1);
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([wallet, count]) => ({ wallet: wallet.slice(0,8) + '...', count }));
+}
+
+function getTopIps(log: any[]) {
+  const counts: Record<string, number> = {};
+  log.forEach(l => counts[l.ip] = (counts[l.ip] || 0) + 1);
+  return Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([ip, count]) => ({ ip, count }));
+}
 // ── 404 Handler ───────────────────────────────────────────────
 
 app.use((_req, res) => {
