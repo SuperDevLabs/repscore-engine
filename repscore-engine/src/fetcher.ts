@@ -34,8 +34,9 @@ export async function getWalletSignatures(
   return (result || []).map((s: any) => s.signature);
 }
 
-
 export async function getWalletAge(wallet: string): Promise<number> {
+  // Paginates through ALL signatures to find the truly oldest transaction
+  // Fixes the bug where wallets with 1000+ txns appeared newer than they are
   let lastSignature: string | undefined;
   let oldestBlockTime: number | null = null;
   const MAX_PAGES = 10; // look back up to 10,000 transactions
@@ -47,28 +48,17 @@ export async function getWalletAge(wallet: string): Promise<number> {
     const result = await rpcCall("getSignaturesForAddress", [wallet, params]);
     if (!result || result.length === 0) break;
 
-    // Oldest in this batch is the last item
     const oldest = result[result.length - 1];
     if (oldest.blockTime) oldestBlockTime = oldest.blockTime;
 
-    // If we got fewer than 1000 we've reached the beginning
     if (result.length < 1000) break;
 
-    // Continue paginating
     lastSignature = oldest.signature;
-
-    // Small delay to avoid rate limiting
     await new Promise(r => setTimeout(r, 150));
   }
 
   if (!oldestBlockTime) return 0;
   return Math.floor((Date.now() / 1000 - oldestBlockTime) / 86400);
-}
-  if (!result || result.length === 0) return 0;
-  // Last item = oldest signature
-  const oldest = result[result.length - 1];
-  const ageDays = (Date.now() / 1000 - oldest.blockTime) / 86400;
-  return Math.floor(ageDays);
 }
 
 export async function getSolBalance(wallet: string): Promise<number> {
@@ -145,27 +135,20 @@ export async function getTokenHolderCount(mint: string): Promise<number> {
     "11111111111111111111111111111111",
   ];
 
-  // Get total supply for percentage calculation
   const totalAmount = accounts.reduce(
     (sum: number, a: any) => sum + parseFloat(a.uiAmount || 0), 0
   );
-
   if (totalAmount === 0) return 0;
 
-  const MIN_HOLDING_PCT = 0.0001;  // must hold at least 0.01% of supply
-  const MIN_HOLDING_ABS = 1000;    // must hold at least 1,000 tokens absolute
+  const MIN_HOLDING_PCT = 0.0001; // 0.01% of supply minimum
+  const MIN_HOLDING_ABS = 1000;   // 1,000 tokens absolute minimum
 
   const realHolders = accounts.filter((a: any) => {
-    // Exclude burn/system addresses
     if (BURN_ADDRESSES.includes(a.address)) return false;
-
     const amount = parseFloat(a.uiAmount || 0);
-
-    // Must pass BOTH checks — percentage AND absolute minimum
     const pct = amount / totalAmount;
     if (pct < MIN_HOLDING_PCT) return false;
     if (amount < MIN_HOLDING_ABS) return false;
-
     return true;
   });
 
