@@ -188,8 +188,7 @@ app.post("/v1/score/:wallet/refresh", requireApiKey, async (req, res) => {
 app.use("/webhooks", webhookRouter);
 
 // ── Analytics — recent lookups ────────────────────────────────
-const lookupLog: any[] = [];
-const MAX_LOG = 500;
+
 
 app.get("/internal/lookups", async (req, res) => {
   const secret = req.headers["x-internal-secret"];
