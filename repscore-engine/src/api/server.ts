@@ -84,6 +84,20 @@ app.get("/v1/score/:wallet", publicLimiter, apiKeyLimiter, async (req, res) => {
     return;
   }
 
+  // ── Lookup analytics ──────────────────────────────────────
+  const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
+    || req.socket.remoteAddress
+    || 'unknown';
+  const userAgent = req.headers['user-agent'] || 'unknown';
+  console.log(JSON.stringify({
+    event: "wallet_lookup",
+    wallet,
+    ip,
+    userAgent,
+    timestamp: new Date().toISOString(),
+    forceRefresh,
+  }));
+
   try {
     // Check cache unless force refresh
     if (!forceRefresh) {
