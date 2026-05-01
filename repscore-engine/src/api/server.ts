@@ -5,7 +5,8 @@ import { computeRepScore } from "../engine.ts";
 import { getCachedScore, setCachedScore, bustCache, getCacheStats } from "../cache.ts";
 import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
 import { webhookRouter } from "./webhook.ts";
-
+const lookupLog: any[] = [];
+const MAX_LOG = 500;
 const app = express();
 app.use(express.json());
 
