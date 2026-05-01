@@ -97,7 +97,8 @@ app.get("/v1/score/:wallet", publicLimiter, apiKeyLimiter, async (req, res) => {
     timestamp: new Date().toISOString(),
     forceRefresh,
   }));
-
+  lookupLog.push({ wallet, ip, timestamp: new Date().toISOString() });
+  if (lookupLog.length > MAX_LOG) lookupLog.shift();
   try {
     // Check cache unless force refresh
     if (!forceRefresh) {
