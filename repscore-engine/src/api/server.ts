@@ -98,8 +98,9 @@ app.get("/v1/score/:wallet", publicLimiter, apiKeyLimiter, async (req, res) => {
     timestamp: new Date().toISOString(),
     forceRefresh,
   }));
-  const visitorId = req.headers['x-visitor-id'] as string || 'unknown';
-lookupLog.push({ wallet, ip, visitorId, timestamp: new Date().toISOString() });
+  const visitorId   = req.headers['x-visitor-id'] as string || 'unknown';
+const fingerprint = req.headers['x-fingerprint'] as string || 'unknown';
+lookupLog.push({ wallet, ip, visitorId, fingerprint, timestamp: new Date().toISOString() });
   if (lookupLog.length > MAX_LOG) lookupLog.shift();
   try {
     // Check cache unless force refresh
@@ -203,7 +204,27 @@ app.get("/internal/lookups", async (req, res) => {
     topWallets: getTopWallets(lookupLog),
     topIps: getTopIps(lookupLog),
     topVisitors: getTopVisitors(lookupLog),
+    topFingerprints: getTopFingerprints(lookupLog),
   });
+  function getTopFingerprints(log: any[]) {
+  const counts: Record<string, { count: number; wallets: Set<string>; ips: Set<string> }> = {};
+  log.forEach(l => {
+    if (l.fingerprint === 'unknown') return;
+    if (!counts[l.fingerprint]) counts[l.fingerprint] = { count: 0, wallets: new Set(), ips: new Set() };
+    counts[l.fingerprint].count++;
+    counts[l.fingerprint].wallets.add(l.wallet);
+    counts[l.fingerprint].ips.add(l.ip);
+  });
+  return Object.entries(counts)
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, 10)
+    .map(([fingerprint, data]) => ({
+      fingerprint,
+      lookups: data.count,
+      uniqueWallets: data.wallets.size,
+      uniqueIps: data.ips.size,
+    }));
+}
 });
 
 function getTopWallets(log: any[]) {
