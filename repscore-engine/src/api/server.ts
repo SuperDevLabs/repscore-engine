@@ -98,7 +98,8 @@ app.get("/v1/score/:wallet", publicLimiter, apiKeyLimiter, async (req, res) => {
     timestamp: new Date().toISOString(),
     forceRefresh,
   }));
-  lookupLog.push({ wallet, ip, timestamp: new Date().toISOString() });
+  const visitorId = req.headers['x-visitor-id'] as string || 'unknown';
+lookupLog.push({ wallet, ip, visitorId, timestamp: new Date().toISOString() });
   if (lookupLog.length > MAX_LOG) lookupLog.shift();
   try {
     // Check cache unless force refresh
@@ -201,6 +202,7 @@ app.get("/internal/lookups", async (req, res) => {
     recent: lookupLog.slice(-50),
     topWallets: getTopWallets(lookupLog),
     topIps: getTopIps(lookupLog),
+    topVisitors: getTopVisitors(lookupLog),
   });
 });
 
@@ -220,6 +222,22 @@ function getTopIps(log: any[]) {
     .sort((a, b) => b[1] - a[1])
     .slice(0, 10)
     .map(([ip, count]) => ({ ip, count }));
+}
+function getTopVisitors(log: any[]) {
+  const counts: Record<string, { count: number; wallets: Set<string> }> = {};
+  log.forEach(l => {
+    if (!counts[l.visitorId]) counts[l.visitorId] = { count: 0, wallets: new Set() };
+    counts[l.visitorId].count++;
+    counts[l.visitorId].wallets.add(l.wallet);
+  });
+  return Object.entries(counts)
+    .sort((a, b) => b[1].count - a[1].count)
+    .slice(0, 10)
+    .map(([visitorId, data]) => ({
+      visitorId,
+      lookups: data.count,
+      uniqueWallets: data.wallets.size,
+    }));
 }
 
 // ── 404 Handler ───────────────────────────────────────────────
