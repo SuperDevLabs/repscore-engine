@@ -12,7 +12,8 @@ import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
 import { webhookRouter } from "./webhook.ts";
 
 const app = express();
-app.use(express.json());
+app.set('trust proxy', 1);
+app.use(express.json())
 
 // ── CORS ──────────────────────────────────────────────────────
 
