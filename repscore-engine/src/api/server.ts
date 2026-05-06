@@ -1,10 +1,8 @@
-import express, { Request, Response, NextFunction } from "express";
-import cors from "cors";
-import rateLimit from "express-rate-limit";
-import { computeRepScore } from "../engine.ts";
-import { getCachedScore, setCachedScore, bustCache, getCacheStats } from "../cache.ts";
-import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
-import { webhookRouter } from "./webhook.ts";
+// ============================================================
+// RepScore Engine — API Server
+// REST endpoints for repscore.xyz
+// ============================================================
+
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
@@ -13,45 +11,11 @@ import { getCachedScore, setCachedScore, bustCache, getCacheStats } from "../cac
 import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
 import { webhookRouter } from "./webhook.ts";
 
-// ── Supabase client ───────────────────────────────────────────
-const SUPABASE_URL = process.env.SUPABASE_URL || '';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
-
-async function logToSupabase(data: {
-  wallet: string;
-  ip: string;
-  visitor_id: string;
-  fingerprint: string;
-}) {
-  if (!SUPABASE_URL || !SUPABASE_KEY) {
-    console.warn('[Supabase] Missing URL or KEY');
-    return;
-  }
-  try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/wallet_lookups`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': SUPABASE_KEY,
-        'Authorization': `Bearer ${SUPABASE_KEY}`,
-        'Prefer': 'return=minimal',
-      },
-      body: JSON.stringify(data),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      console.warn('[Supabase] Write failed:', res.status, text);
-    } else {
-      console.log('[Supabase] ✓ Logged wallet:', data.wallet.slice(0,8));
-    }
-  } catch (err: any) {
-    console.warn('[Supabase] Error:', err.message);
-  }
-}
+const app = express();
+app.use(express.json());
 
 // ── CORS ──────────────────────────────────────────────────────
-const app = express();
-app.use(cors({
+
 app.use(cors({
   origin: [
     "https://repscore.xyz",
@@ -102,6 +66,48 @@ function isValidSolanaAddress(addr: string): boolean {
   return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr);
 }
 
+// ── Supabase persistent logging ───────────────────────────────
+
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+
+async function logToSupabase(data: {
+  wallet: string;
+  ip: string;
+  visitor_id: string;
+  fingerprint: string;
+}) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    console.warn('[Supabase] Missing URL or KEY');
+    return;
+  }
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/wallet_lookups`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.warn('[Supabase] Write failed:', res.status, text);
+    } else {
+      console.log('[Supabase] ✓ Logged:', data.wallet.slice(0, 8) + '...');
+    }
+  } catch (err: any) {
+    console.warn('[Supabase] Error:', err.message);
+  }
+}
+
+// ── In-memory analytics log ───────────────────────────────────
+
+const lookupLog: any[] = [];
+const MAX_LOG = 500;
+
 // ── Routes ────────────────────────────────────────────────────
 
 // Health check
@@ -125,23 +131,17 @@ app.get("/v1/score/:wallet", publicLimiter, apiKeyLimiter, async (req, res) => {
     return;
   }
 
-  // ── Lookup analytics ──────────────────────────────────────
+  // ── Lookup tracking ───────────────────────────────────────
   const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
-    || req.socket.remoteAddress
-    || 'unknown';
-  const userAgent = req.headers['user-agent'] || 'unknown';
-  console.log(JSON.stringify({
-    event: "wallet_lookup",
-    wallet,
-    ip,
-    userAgent,
-    timestamp: new Date().toISOString(),
-    forceRefresh,
-  }));
+    || req.socket.remoteAddress || 'unknown';
   const visitorId   = req.headers['x-visitor-id'] as string || 'unknown';
-const fingerprint = req.headers['x-fingerprint'] as string || 'unknown';
-lookupLog.push({ wallet, ip, visitorId, fingerprint, timestamp: new Date().toISOString() });
+  const fingerprint = req.headers['x-fingerprint'] as string || 'unknown';
+
+  lookupLog.push({ wallet, ip, visitorId, fingerprint, timestamp: new Date().toISOString() });
   if (lookupLog.length > MAX_LOG) lookupLog.shift();
+
+  logToSupabase({ wallet, ip, visitor_id: visitorId, fingerprint });
+
   try {
     // Check cache unless force refresh
     if (!forceRefresh) {
@@ -226,11 +226,12 @@ app.post("/v1/score/:wallet/refresh", requireApiKey, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
 // ── Webhook routes ────────────────────────────────────────────
+
 app.use("/webhooks", webhookRouter);
 
-// ── Analytics — recent lookups ────────────────────────────────
-
+// ── Analytics endpoint ────────────────────────────────────────
 
 app.get("/internal/lookups", async (req, res) => {
   const secret = req.headers["x-internal-secret"];
@@ -246,7 +247,34 @@ app.get("/internal/lookups", async (req, res) => {
     topVisitors: getTopVisitors(lookupLog),
     topFingerprints: getTopFingerprints(lookupLog),
   });
-  function getTopFingerprints(log: any[]) {
+});
+
+function getTopWallets(log: any[]) {
+  const counts: Record<string, number> = {};
+  log.forEach(l => counts[l.wallet] = (counts[l.wallet] || 0) + 1);
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 10)
+    .map(([wallet, count]) => ({ wallet: wallet.slice(0, 8) + '...', count }));
+}
+
+function getTopIps(log: any[]) {
+  const counts: Record<string, number> = {};
+  log.forEach(l => counts[l.ip] = (counts[l.ip] || 0) + 1);
+  return Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 10)
+    .map(([ip, count]) => ({ ip, count }));
+}
+
+function getTopVisitors(log: any[]) {
+  const counts: Record<string, { count: number; wallets: Set<string> }> = {};
+  log.forEach(l => {
+    if (!counts[l.visitorId]) counts[l.visitorId] = { count: 0, wallets: new Set() };
+    counts[l.visitorId].count++;
+    counts[l.visitorId].wallets.add(l.wallet);
+  });
+  return Object.entries(counts).sort((a, b) => b[1].count - a[1].count).slice(0, 10)
+    .map(([visitorId, data]) => ({ visitorId, lookups: data.count, uniqueWallets: data.wallets.size }));
+}
+
+function getTopFingerprints(log: any[]) {
   const counts: Record<string, { count: number; wallets: Set<string>; ips: Set<string> }> = {};
   log.forEach(l => {
     if (l.fingerprint === 'unknown') return;
@@ -255,53 +283,12 @@ app.get("/internal/lookups", async (req, res) => {
     counts[l.fingerprint].wallets.add(l.wallet);
     counts[l.fingerprint].ips.add(l.ip);
   });
-  return Object.entries(counts)
-    .sort((a, b) => b[1].count - a[1].count)
-    .slice(0, 10)
-    .map(([fingerprint, data]) => ({
-      fingerprint,
-      lookups: data.count,
-      uniqueWallets: data.wallets.size,
-      uniqueIps: data.ips.size,
-    }));
-}
-});
-
-function getTopWallets(log: any[]) {
-  const counts: Record<string, number> = {};
-  log.forEach(l => counts[l.wallet] = (counts[l.wallet] || 0) + 1);
-  return Object.entries(counts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(([wallet, count]) => ({ wallet: wallet.slice(0,8) + '...', count }));
-}
-
-function getTopIps(log: any[]) {
-  const counts: Record<string, number> = {};
-  log.forEach(l => counts[l.ip] = (counts[l.ip] || 0) + 1);
-  return Object.entries(counts)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(([ip, count]) => ({ ip, count }));
-}
-function getTopVisitors(log: any[]) {
-  const counts: Record<string, { count: number; wallets: Set<string> }> = {};
-  log.forEach(l => {
-    if (!counts[l.visitorId]) counts[l.visitorId] = { count: 0, wallets: new Set() };
-    counts[l.visitorId].count++;
-    counts[l.visitorId].wallets.add(l.wallet);
-  });
-  return Object.entries(counts)
-    .sort((a, b) => b[1].count - a[1].count)
-    .slice(0, 10)
-    .map(([visitorId, data]) => ({
-      visitorId,
-      lookups: data.count,
-      uniqueWallets: data.wallets.size,
-    }));
+  return Object.entries(counts).sort((a, b) => b[1].count - a[1].count).slice(0, 10)
+    .map(([fingerprint, data]) => ({ fingerprint, lookups: data.count, uniqueWallets: data.wallets.size, uniqueIps: data.ips.size }));
 }
 
 // ── 404 Handler ───────────────────────────────────────────────
+
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
 });
