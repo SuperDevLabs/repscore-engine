@@ -20,6 +20,7 @@ import {
 } from "./scorers/index.js";
 
 import { detectStreamflowLocks } from "./streamflow.js";
+import { detectSelfSnipe } from "./bundleDetector.js";
 
 // ── Main Entry Point ──────────────────────────────────────────
 
@@ -129,7 +130,6 @@ async function buildLaunchRecord(
     detectStreamflowLocks(deployer),
   ]);
 
-  // Estimate survived hours from token activity
   const deployedAt = Date.now() / 1000 - 86400 * 14;
   const lastActivityAt = lpData.stillActive
     ? Date.now() / 1000
@@ -143,12 +143,16 @@ async function buildLaunchRecord(
 
   const isGraduated = lpData.stillActive && lpData.initialLpSol > 10;
 
-  // Use real Streamflow data
+  // Real Streamflow lock data
   const devTokensLocked = streamflowData.hasActiveLocks;
   const devLockDays = streamflowData.avgLockDays;
-  const devLockPct = streamflowData.hasActiveLocks ? 80 : null; // approximate
+  const devLockPct = streamflowData.hasActiveLocks ? 80 : null;
+
+  // Real bundle/self-snipe detection
+  const snipeData = await detectSelfSnipe(mint, deployer, deployedAt);
 
   console.log(`[Streamflow] ${deployer.slice(0,8)}... locks: ${streamflowData.lockCount} (active: ${streamflowData.hasActiveLocks})`);
+  console.log(`[Bundle] ${deployer.slice(0,8)}... selfSniped: ${snipeData.selfSniped} (confidence: ${snipeData.confidence})`);
 
   return {
     mint,
@@ -165,10 +169,10 @@ async function buildLaunchRecord(
     devSoldBeforeLockExpiry: streamflowData.hasExpiredLocks && !streamflowData.hasActiveLocks,
 
     // Dev wallet behavior
-    devAllocationPct: 5,            // default — refine with supply analysis
+    devAllocationPct: 5,
     devFirstSellHours,
-    devSoldPct50InFirstHour: false, // refine with wallet tx analysis
-    selfSniped: false,              // refine with bundle detection
+    devSoldPct50InFirstHour: false,
+    selfSniped: snipeData.selfSniped,
 
     // Post-graduation Raydium LP
     postGradLpLocked: false,        // refine with Raydium LP lock indexer
