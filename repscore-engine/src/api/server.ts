@@ -5,6 +5,42 @@ import { computeRepScore } from "../engine.ts";
 import { getCachedScore, setCachedScore, bustCache, getCacheStats } from "../cache.ts";
 import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
 import { webhookRouter } from "./webhook.ts";
+import express, { Request, Response, NextFunction } from "express";
+import cors from "cors";
+import rateLimit from "express-rate-limit";
+import { computeRepScore } from "../engine.ts";
+import { getCachedScore, setCachedScore, bustCache, getCacheStats } from "../cache.ts";
+import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
+import { webhookRouter } from "./webhook.ts";
+
+// ── Supabase client ───────────────────────────────────────────
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+
+async function logToSupabase(data: {
+  wallet: string;
+  ip: string;
+  visitor_id: string;
+  fingerprint: string;
+}) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return;
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/wallet_lookups`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify(data),
+    });
+  } catch (err: any) {
+    console.warn('[Supabase] Log failed:', err.message);
+  }
+}
+
+const lookupLog: any[] = [];
 const lookupLog: any[] = [];
 const MAX_LOG = 500;
 const app = express();
