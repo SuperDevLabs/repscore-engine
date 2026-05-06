@@ -23,9 +23,12 @@ async function logToSupabase(data: {
   visitor_id: string;
   fingerprint: string;
 }) {
-  if (!SUPABASE_URL || !SUPABASE_KEY) return;
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    console.warn('[Supabase] Missing URL or KEY');
+    return;
+  }
   try {
-    await fetch(`${SUPABASE_URL}/rest/v1/wallet_lookups`, {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/wallet_lookups`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -35,15 +38,16 @@ async function logToSupabase(data: {
       },
       body: JSON.stringify(data),
     });
+    if (!res.ok) {
+      const text = await res.text();
+      console.warn('[Supabase] Write failed:', res.status, text);
+    } else {
+      console.log('[Supabase] ✓ Logged wallet:', data.wallet.slice(0,8));
+    }
   } catch (err: any) {
-    console.warn('[Supabase] Log failed:', err.message);
+    console.warn('[Supabase] Error:', err.message);
   }
 }
-
-const lookupLog: any[] = [];
-const MAX_LOG = 500;
-const app = express();
-app.use(express.json());
 
 // ── CORS ──────────────────────────────────────────────────────
 
