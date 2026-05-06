@@ -21,6 +21,7 @@ import {
 
 import { detectStreamflowLocks } from "./streamflow.js";
 import { detectSelfSnipe } from "./bundleDetector.js";
+import { detectRaydiumGraduation } from "./raydiumDetector.js";
 
 // ── Main Entry Point ──────────────────────────────────────────
 
@@ -122,16 +123,15 @@ async function buildLaunchRecord(
   deployer: string,
   txns: any[]
 ): Promise<TokenLaunch> {
-  const [lpData, rugData, tokenMeta, holderCount, streamflowData] = await Promise.all([
-    getLpData(mint),
-    detectLiquidityPull(mint, Date.now() / 1000 - 86400 * 30),
+  const [graduationData, tokenMeta, holderCount, streamflowData] = await Promise.all([
+    detectRaydiumGraduation(mint),
     getTokenMetadata(mint),
     getTokenHolderCount(mint),
     detectStreamflowLocks(deployer),
   ]);
 
   const deployedAt = Date.now() / 1000 - 86400 * 14;
-  const lastActivityAt = lpData.stillActive
+  const lastActivityAt = graduationData.graduated
     ? Date.now() / 1000
     : deployedAt + 3600 * 6;
   const survivedHours = (lastActivityAt - deployedAt) / 3600;
@@ -141,8 +141,6 @@ async function buildLaunchRecord(
     ? (devTxns[devTxns.length - 2].timestamp - deployedAt) / 3600
     : null;
 
-  const isGraduated = lpData.stillActive && lpData.initialLpSol > 10;
-
   // Real Streamflow lock data
   const devTokensLocked = streamflowData.hasActiveLocks;
   const devLockDays = streamflowData.avgLockDays;
@@ -151,6 +149,7 @@ async function buildLaunchRecord(
   // Real bundle/self-snipe detection
   const snipeData = await detectSelfSnipe(mint, deployer, deployedAt);
 
+  console.log(`[Raydium] ${mint.slice(0,8)}... graduated: ${graduationData.graduated}, platform: ${graduationData.platform}, LP pulled: ${graduationData.lpPulled}`);
   console.log(`[Streamflow] ${deployer.slice(0,8)}... locks: ${streamflowData.lockCount} (active: ${streamflowData.hasActiveLocks})`);
   console.log(`[Bundle] ${deployer.slice(0,8)}... selfSniped: ${snipeData.selfSniped} (confidence: ${snipeData.confidence})`);
 
@@ -160,7 +159,7 @@ async function buildLaunchRecord(
     deployedAt,
     lastActivityAt,
     survivedHours: Math.max(0, survivedHours),
-    graduated: isGraduated,
+    graduated: graduationData.graduated,
 
     // Real Streamflow lock data
     devTokensLocked,
@@ -173,6 +172,12 @@ async function buildLaunchRecord(
     devFirstSellHours,
     devSoldPct50InFirstHour: false,
     selfSniped: snipeData.selfSniped,
+
+    // Post-graduation LP — real data
+    postGradLpLocked: false,
+    postGradLpLockDays: null,
+    postGradLpPulled: graduationData.lpPulled,
+    postGradLpPulledHours: graduationData.lpPulledHoursAfterGrad,
 
     // Post-graduation Raydium LP
     postGradLpLocked: false,        // refine with Raydium LP lock indexer
