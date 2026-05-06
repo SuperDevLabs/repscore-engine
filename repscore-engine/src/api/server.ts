@@ -50,7 +50,8 @@ async function logToSupabase(data: {
 }
 
 // ── CORS ──────────────────────────────────────────────────────
-
+const app = express();
+app.use(cors({
 app.use(cors({
   origin: [
     "https://repscore.xyz",
