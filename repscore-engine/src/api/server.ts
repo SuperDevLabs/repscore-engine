@@ -12,8 +12,7 @@ import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
 import { webhookRouter } from "./webhook.ts";
 
 const app = express();
-app.set('trust proxy', 1);
-app.use(express.json())
+app.use(express.json());
 
 // ── CORS ──────────────────────────────────────────────────────
 
@@ -104,6 +103,42 @@ async function logToSupabase(data: {
   }
 }
 
+// ── Score snapshot logging ────────────────────────────────────
+
+async function logScoreSnapshot(wallet: string, score: any) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return;
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/score_history`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Prefer': 'return=minimal',
+      },
+      body: JSON.stringify({
+        wallet,
+        score: score.score,
+        tier: score.tier,
+        launch_history_raw: score.components.launchHistory.raw,
+        liquidity_raw: score.components.liquidityBehavior.raw,
+        holder_retention_raw: score.components.holderRetention.raw,
+        community_raw: score.components.communitySignals.raw,
+        wallet_history_raw: score.components.walletHistory.raw,
+        flag_count: score.flags.length,
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.warn('[Supabase] Snapshot failed:', res.status, text);
+    } else {
+      console.log('[Supabase] ✓ Snapshot saved:', wallet.slice(0,8) + '...');
+    }
+  } catch (err: any) {
+    console.warn('[Supabase] Snapshot error:', err.message);
+  }
+}
+
 // ── In-memory analytics log ───────────────────────────────────
 
 const lookupLog: any[] = [];
@@ -157,6 +192,7 @@ app.get("/v1/score/:wallet", publicLimiter, apiKeyLimiter, async (req, res) => {
     console.log(`[API] Computing score for ${wallet.slice(0, 8)}...`);
     const score = await computeRepScore(wallet);
     await setCachedScore(wallet, score);
+    logScoreSnapshot(wallet, score);
 
     res.json({ success: true, data: score, fromCache: false } as ScoreResponse);
   } catch (err: any) {
@@ -288,6 +324,35 @@ function getTopFingerprints(log: any[]) {
     .map(([fingerprint, data]) => ({ fingerprint, lookups: data.count, uniqueWallets: data.wallets.size, uniqueIps: data.ips.size }));
 }
 
+// ── Score history endpoint ───────────────────────────────────
+
+app.get("/v1/history/:wallet", async (req, res) => {
+  const { wallet } = req.params;
+  if (!isValidSolanaAddress(wallet)) {
+    res.status(400).json({ error: "Invalid wallet address" });
+    return;
+  }
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    res.status(503).json({ error: "History unavailable" });
+    return;
+  }
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/score_history?wallet=eq.${wallet}&order=created_at.asc&limit=90`,
+      {
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+        },
+      }
+    );
+    const data = await response.json();
+    res.json({ success: true, history: data });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── 404 Handler ───────────────────────────────────────────────
 
 app.use((_req, res) => {
@@ -304,3 +369,4 @@ app.listen(PORT, () => {
 });
 
 export default app;
+
