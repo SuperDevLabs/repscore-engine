@@ -41,7 +41,6 @@ async function logToSupabase(data: {
 }
 
 const lookupLog: any[] = [];
-const lookupLog: any[] = [];
 const MAX_LOG = 500;
 const app = express();
 app.use(express.json());
