@@ -30,12 +30,12 @@ export async function computeRepScore(wallet: string): Promise<RepScore> {
   const flags: ScoreFlag[] = [];
 
   const [signatures, walletAgeDays] = await Promise.all([
-    getWalletSignatures(wallet, 300),
+    getWalletSignatures(wallet, 600),
     getWalletAge(wallet),
   ]);
 
   const txns = signatures.length > 0
-    ? await getEnhancedTransactions(signatures.slice(0, 150))
+    ? await getEnhancedTransactions(signatures.slice(0, 200))
     : [];
 
   const [mintRecords, totalVolumeSol, linkedWallets] = await Promise.all([
