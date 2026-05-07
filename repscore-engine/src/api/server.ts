@@ -10,7 +10,7 @@ import { computeRepScore } from "../engine.ts";
 import { getCachedScore, setCachedScore, bustCache, getCacheStats } from "../cache.ts";
 import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
 import { webhookRouter } from "./webhook.ts";
-import { sendScoreChangeAlert, sendVerificationEmail } from "./email.js";
+import { sendScoreChangeAlert, sendVerificationEmail } from "../email.js";
 
 const app = express();
 app.use(express.json());
