@@ -130,19 +130,23 @@ async function buildLaunchRecord(
   const now = Date.now() / 1000;
 
   const [graduationData, tokenMeta, holderCount, streamflowData] = await Promise.all([
-    detectRaydiumGraduation(mint),
+    detectRaydiumGraduation(mint, deployer, deployedAt),
     getTokenMetadata(mint),
     getTokenHolderCount(mint),
     detectStreamflowLocks(deployer),
   ]);
 
-  // Real survived hours based on actual deploy timestamp
-  const lastActivityAt = graduationData.graduated
-    ? now                          // still active on Raydium
-    : graduationData.currentLiquidityUsd > 500
-      ? now                        // still has liquidity on pump.fun
-      : deployedAt + 3600 * 2;    // assume died ~2h after if no liquidity
-
+  // Real survived hours — use liquidity as proxy for whether token is alive
+  let lastActivityAt: number;
+  if (graduationData.graduated) {
+    lastActivityAt = now; // still live on Raydium
+  } else if (graduationData.currentLiquidityUsd > 100) {
+    lastActivityAt = now; // still has pump.fun liquidity
+  } else {
+    // Token appears dead — cap at time elapsed since deploy
+    const elapsed = now - deployedAt;
+    lastActivityAt = deployedAt + Math.min(elapsed, 3600 * 48);
+  }
   const survivedHours = Math.max(0, (lastActivityAt - deployedAt) / 3600);
 
   // Dev sell timing from wallet transactions
