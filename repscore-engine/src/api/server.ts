@@ -225,6 +225,7 @@ app.get("/v1/score/:wallet", publicLimiter, apiKeyLimiter, async (req, res) => {
     await setCachedScore(wallet, score);
     logScoreSnapshot(wallet, score);
     upsertLeaderboard(wallet, score);
+    checkWatchlistChanges(wallet, score);
 
     res.json({ success: true, data: score, fromCache: false } as ScoreResponse);
   } catch (err: any) {
@@ -417,6 +418,165 @@ app.get("/v1/leaderboard", async (req, res) => {
   }
 });
 
+// ── Watchlist endpoints ───────────────────────────────────────
+
+// GET /v1/watchlist?email=xxx — get all watched wallets for email
+app.get("/v1/watchlist", async (req, res) => {
+  const email = req.query.email as string;
+  if (!email || !email.includes('@')) {
+    res.status(400).json({ error: "Valid email required" });
+    return;
+  }
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    res.status(503).json({ error: "Watchlist unavailable" });
+    return;
+  }
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/watchlist?email=eq.${encodeURIComponent(email)}&order=created_at.desc`,
+      { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } }
+    );
+    const data = await response.json();
+    res.json({ success: true, watchlist: data });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /v1/watchlist — add wallet to watchlist
+app.post("/v1/watchlist", async (req, res) => {
+  const { email, wallet, label } = req.body;
+  if (!email || !wallet || !isValidSolanaAddress(wallet)) {
+    res.status(400).json({ success: false, error: "Valid email and wallet required" });
+    return;
+  }
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    res.status(503).json({ error: "Watchlist unavailable" });
+    return;
+  }
+  try {
+    // Add to watchlist
+    const response = await fetch(`${SUPABASE_URL}/rest/v1/watchlist`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Prefer': 'resolution=ignore-duplicates',
+      },
+      body: JSON.stringify({ email, wallet, label: label || null }),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text);
+    }
+
+    // Trigger a score fetch so we have initial data
+    const cached = await getCachedScore(wallet);
+    if (!cached) {
+      // Score in background — don't wait
+      computeRepScore(wallet).then(async (score) => {
+        await setCachedScore(wallet, score);
+        logScoreSnapshot(wallet, score);
+        upsertLeaderboard(wallet, score);
+        // Update watchlist with initial score
+        await updateWatchlistScore(email, wallet, score);
+      }).catch(() => {});
+    } else {
+      await updateWatchlistScore(email, wallet, cached);
+    }
+
+    res.json({ success: true, message: "Wallet added to watchlist" });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// DELETE /v1/watchlist — remove wallet from watchlist
+app.delete("/v1/watchlist", async (req, res) => {
+  const { email, wallet } = req.body;
+  if (!email || !wallet) {
+    res.status(400).json({ error: "Email and wallet required" });
+    return;
+  }
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    res.status(503).json({ error: "Watchlist unavailable" });
+    return;
+  }
+  try {
+    await fetch(
+      `${SUPABASE_URL}/rest/v1/watchlist?email=eq.${encodeURIComponent(email)}&wallet=eq.${wallet}`,
+      {
+        method: 'DELETE',
+        headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` },
+      }
+    );
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Helper — update watchlist score after scoring
+async function updateWatchlistScore(email: string, wallet: string, score: any) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return;
+  try {
+    await fetch(
+      `${SUPABASE_URL}/rest/v1/watchlist?email=eq.${encodeURIComponent(email)}&wallet=eq.${wallet}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+        },
+        body: JSON.stringify({
+          last_score: score.score,
+          last_tier: score.tier,
+          last_scored_at: new Date().toISOString(),
+        }),
+      }
+    );
+  } catch {}
+}
+
+// Helper — check watchlist for score changes and update
+async function checkWatchlistChanges(wallet: string, newScore: any) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return;
+  try {
+    // Get all watchers for this wallet
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/watchlist?wallet=eq.${wallet}&alert_on_change=eq.true`,
+      { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } }
+    );
+    const watchers = await res.json();
+
+    for (const watcher of watchers) {
+      if (!watcher.last_score) {
+        // First score — just update, no alert
+        await updateWatchlistScore(watcher.email, wallet, newScore);
+        continue;
+      }
+
+      const change = Math.abs(newScore.score - watcher.last_score);
+      const minChange = watcher.min_change || 50;
+
+      if (change >= minChange) {
+        // Score changed significantly — log it (email sending requires email service)
+        console.log(`[Watchlist] Alert: ${wallet.slice(0,8)}... score changed ${watcher.last_score} → ${newScore.score} for ${watcher.email}`);
+        // Update score
+        await updateWatchlistScore(watcher.email, wallet, newScore);
+      } else {
+        // Small change — just update silently
+        await updateWatchlistScore(watcher.email, wallet, newScore);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[Watchlist] Check failed:', err.message);
+  }
+}
+
 // ── 404 Handler ───────────────────────────────────────────────
 
 app.use((_req, res) => {
@@ -433,3 +593,4 @@ app.listen(PORT, () => {
 });
 
 export default app;
+
