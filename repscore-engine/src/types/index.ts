@@ -55,7 +55,7 @@ export interface ScoreMetadata {
   avgLongevityHours: number;
   avgHolderRetention7d: number;
   avgHolderRetention30d: number;
-  walletAgeDays: number;
+  totalTransactions: number;
   totalVolumeSol: number;
   lastActivityAt: string;
 }
