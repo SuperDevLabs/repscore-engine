@@ -9,9 +9,8 @@ import {
 
 import {
   getWalletSignatures, getWalletAge, getEnhancedTransactions,
-  getTokensDeployedBy, getLpData, detectLiquidityPull,
-  getTokenMetadata, getWalletVolume, detectLinkedWallets,
-  getTokenHolderCount,
+  getTokensDeployedBy, getTokenMetadata, getWalletVolume,
+  detectLinkedWallets, getTokenHolderCount,
 } from "./fetcher.js";
 
 import {
@@ -39,14 +38,18 @@ export async function computeRepScore(wallet: string): Promise<RepScore> {
     ? await getEnhancedTransactions(signatures.slice(0, 150))
     : [];
 
-  const [mintAddresses, totalVolumeSol, linkedWallets] = await Promise.all([
+  const [mintRecords, totalVolumeSol, linkedWallets] = await Promise.all([
     getTokensDeployedBy(wallet),
     getWalletVolume(txns, wallet),
     detectLinkedWallets(wallet, txns),
   ]);
 
+  console.log(`[RepScore] ${wallet.slice(0,8)}... found ${mintRecords.length} token(s) deployed`);
+
   const launches: TokenLaunch[] = await Promise.all(
-    mintAddresses.slice(0, 20).map((mint) => buildLaunchRecord(mint, wallet, txns))
+    mintRecords.slice(0, 20).map((record) =>
+      buildLaunchRecord(record.mint, record.deployedAt, wallet, txns)
+    )
   );
 
   const role: WalletRole = detectRole(launches, signatures.length);
@@ -120,9 +123,12 @@ export async function computeRepScore(wallet: string): Promise<RepScore> {
 
 async function buildLaunchRecord(
   mint: string,
+  deployedAt: number,    // real timestamp from getTokensDeployedBy
   deployer: string,
   txns: any[]
 ): Promise<TokenLaunch> {
+  const now = Date.now() / 1000;
+
   const [graduationData, tokenMeta, holderCount, streamflowData] = await Promise.all([
     detectRaydiumGraduation(mint),
     getTokenMetadata(mint),
@@ -130,15 +136,22 @@ async function buildLaunchRecord(
     detectStreamflowLocks(deployer),
   ]);
 
-  const deployedAt = Date.now() / 1000 - 86400 * 14;
+  // Real survived hours based on actual deploy timestamp
   const lastActivityAt = graduationData.graduated
-    ? Date.now() / 1000
-    : deployedAt + 3600 * 6;
-  const survivedHours = (lastActivityAt - deployedAt) / 3600;
+    ? now                          // still active on Raydium
+    : graduationData.currentLiquidityUsd > 500
+      ? now                        // still has liquidity on pump.fun
+      : deployedAt + 3600 * 2;    // assume died ~2h after if no liquidity
 
-  const devTxns = txns.filter((tx) => tx.feePayer === deployer);
+  const survivedHours = Math.max(0, (lastActivityAt - deployedAt) / 3600);
+
+  // Dev sell timing from wallet transactions
+  const devTxns = txns
+    .filter((tx) => tx.feePayer === deployer && tx.timestamp >= deployedAt)
+    .sort((a, b) => a.timestamp - b.timestamp);
+
   const devFirstSellHours = devTxns.length > 1
-    ? (devTxns[devTxns.length - 2].timestamp - deployedAt) / 3600
+    ? (devTxns[1].timestamp - deployedAt) / 3600
     : null;
 
   // Real Streamflow lock data
@@ -146,22 +159,20 @@ async function buildLaunchRecord(
   const devLockDays = streamflowData.avgLockDays;
   const devLockPct = streamflowData.hasActiveLocks ? 80 : null;
 
-  // Real bundle/self-snipe detection
+  // Bundle/self-snipe detection
   const snipeData = await detectSelfSnipe(mint, deployer, deployedAt);
 
-  console.log(`[Raydium] ${mint.slice(0,8)}... graduated: ${graduationData.graduated}, platform: ${graduationData.platform}, LP pulled: ${graduationData.lpPulled}`);
-  console.log(`[Streamflow] ${deployer.slice(0,8)}... locks: ${streamflowData.lockCount} (active: ${streamflowData.hasActiveLocks})`);
-  console.log(`[Bundle] ${deployer.slice(0,8)}... selfSniped: ${snipeData.selfSniped} (confidence: ${snipeData.confidence})`);
+  console.log(`[Launch] ${mint.slice(0,8)}... survived: ${survivedHours.toFixed(1)}h, graduated: ${graduationData.graduated}, sniped: ${snipeData.selfSniped}`);
 
   return {
     mint,
     deployer,
     deployedAt,
     lastActivityAt,
-    survivedHours: Math.max(0, survivedHours),
+    survivedHours,
     graduated: graduationData.graduated,
 
-    // Real Streamflow lock data
+    // Streamflow lock data
     devTokensLocked,
     devLockDays,
     devLockPct,
@@ -173,28 +184,22 @@ async function buildLaunchRecord(
     devSoldPct50InFirstHour: false,
     selfSniped: snipeData.selfSniped,
 
-    // Post-graduation LP — real data
+    // Post-graduation LP
     postGradLpLocked: false,
     postGradLpLockDays: null,
     postGradLpPulled: graduationData.lpPulled,
     postGradLpPulledHours: graduationData.lpPulledHoursAfterGrad,
 
-    // Post-graduation Raydium LP
-    postGradLpLocked: false,        // refine with Raydium LP lock indexer
-    postGradLpLockDays: null,
-    postGradLpPulled: rugData.wasRugged && isGraduated,
-    postGradLpPulledHours: rugData.wasRugged ? 24 : null,
-
     // Holders
     peakHolders: holderCount,
-    holders7d: Math.round(holderCount * 0.6),
+    holders7d:  Math.round(holderCount * 0.6),
     holders30d: Math.round(holderCount * 0.3),
     holders90d: Math.round(holderCount * 0.15),
 
     // On-chain hygiene
     mintRenounced: tokenMeta.mintRenounced,
     freezeAuthorityRevoked: tokenMeta.freezeAuthorityRevoked,
-    telegramDeleted: false, // requires social indexer
+    telegramDeleted: false,
   };
 }
 
