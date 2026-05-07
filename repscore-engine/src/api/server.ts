@@ -12,7 +12,6 @@ import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
 import { webhookRouter } from "./webhook.ts";
 
 const app = express();
-app.set('trust proxy', 1);
 app.use(express.json());
 
 // ── CORS ──────────────────────────────────────────────────────
@@ -535,6 +534,177 @@ app.get("/v1/token/:mint", publicLimiter, async (req, res) => {
   } catch (err: any) {
     console.error("[Token] Lookup error:", err.message);
     res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Verification endpoints ────────────────────────────────────
+
+const PAYMENT_ADDRESS = process.env.PAYMENT_WALLET || '';
+const REQUIRED_SOL    = 0.01;
+const REQUIRED_LAMPORTS = REQUIRED_SOL * 1e9;
+
+// GET /v1/verified/:wallet — check if wallet is verified
+app.get("/v1/verified/:wallet", async (req, res) => {
+  const { wallet } = req.params;
+  if (!isValidSolanaAddress(wallet)) {
+    res.status(400).json({ verified: false });
+    return;
+  }
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    res.json({ verified: false });
+    return;
+  }
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/verified_wallets?wallet=eq.${wallet}&is_active=eq.true&limit=1`,
+      { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } }
+    );
+    const data = await response.json();
+    if (data.length > 0) {
+      res.json({ verified: true, verifiedAt: data[0].verified_at });
+    } else {
+      res.json({ verified: false });
+    }
+  } catch {
+    res.json({ verified: false });
+  }
+});
+
+// POST /v1/verify/payment — verify SOL payment on-chain
+app.post("/v1/verify/payment", async (req, res) => {
+  const { wallet, email, txSignature } = req.body;
+
+  if (!wallet || !email || !txSignature) {
+    res.status(400).json({ success: false, error: "wallet, email, and txSignature required" });
+    return;
+  }
+
+  if (!isValidSolanaAddress(wallet)) {
+    res.status(400).json({ success: false, error: "Invalid wallet address" });
+    return;
+  }
+
+  try {
+    // Verify the transaction on-chain via Helius
+    const heliusRes = await fetch(
+      `https://api.helius.xyz/v0/transactions/?api-key=${process.env.HELIUS_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transactions: [txSignature] }),
+      }
+    );
+
+    if (!heliusRes.ok) throw new Error('Failed to fetch transaction');
+    const txData = await heliusRes.json();
+    const tx = txData?.[0];
+
+    if (!tx) throw new Error('Transaction not found — it may still be processing. Try again in 30 seconds.');
+    if (tx.transactionError) throw new Error('Transaction failed on-chain');
+
+    // Check sender is the wallet being verified
+    if (tx.feePayer !== wallet) {
+      throw new Error('Transaction was not sent from the wallet you are verifying');
+    }
+
+    // Check payment went to our address
+    const paymentTransfer = (tx.nativeTransfers || []).find(
+      (t: any) =>
+        t.fromUserAccount === wallet &&
+        t.toUserAccount === PAYMENT_ADDRESS &&
+        t.amount >= REQUIRED_LAMPORTS * 0.99 // 1% tolerance
+    );
+
+    if (!paymentTransfer && PAYMENT_ADDRESS) {
+      throw new Error(`Payment not found. Send exactly 0.01 SOL from ${wallet.slice(0,6)}... to the payment address.`);
+    }
+
+    // Generate nonce for message signing
+    const nonce = Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+    // Store pending verification in Supabase
+    if (SUPABASE_URL && SUPABASE_KEY) {
+      await fetch(`${SUPABASE_URL}/rest/v1/verified_wallets`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'Prefer': 'resolution=merge-duplicates',
+        },
+        body: JSON.stringify({
+          wallet,
+          email,
+          payment_signature: txSignature,
+          payment_amount_sol: REQUIRED_SOL,
+          nonce,
+          is_active: false, // not active until message signed
+        }),
+      });
+    }
+
+    console.log(`[Verify] Payment confirmed for ${wallet.slice(0,8)}...`);
+    res.json({ success: true, nonce });
+
+  } catch (err: any) {
+    console.warn('[Verify] Payment check failed:', err.message);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// POST /v1/verify/complete — complete verification with signature
+app.post("/v1/verify/complete", async (req, res) => {
+  const { wallet, email, nonce, signature } = req.body;
+
+  if (!wallet || !nonce || !signature) {
+    res.status(400).json({ success: false, error: "wallet, nonce, and signature required" });
+    return;
+  }
+
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    res.status(503).json({ success: false, error: "Verification service unavailable" });
+    return;
+  }
+
+  try {
+    // Check nonce matches what we stored
+    const checkRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/verified_wallets?wallet=eq.${wallet}&nonce=eq.${nonce}&limit=1`,
+      { headers: { 'apikey': SUPABASE_KEY, 'Authorization': `Bearer ${SUPABASE_KEY}` } }
+    );
+    const checkData = await checkRes.json();
+
+    if (!checkData || checkData.length === 0) {
+      throw new Error('Verification session not found. Please restart the process.');
+    }
+
+    // Activate the verification
+    await fetch(
+      `${SUPABASE_URL}/rest/v1/verified_wallets?wallet=eq.${wallet}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+        },
+        body: JSON.stringify({
+          is_active: true,
+          verification_message: signature,
+          verified_at: new Date().toISOString(),
+        }),
+      }
+    );
+
+    // Bust the score cache so verified status shows immediately
+    await bustCache(wallet);
+
+    console.log(`[Verify] ✓ Wallet verified: ${wallet.slice(0,8)}...`);
+    res.json({ success: true, message: "Wallet verified successfully" });
+
+  } catch (err: any) {
+    console.warn('[Verify] Complete failed:', err.message);
+    res.status(400).json({ success: false, error: err.message });
   }
 });
 
