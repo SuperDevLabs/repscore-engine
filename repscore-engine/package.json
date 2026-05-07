@@ -3,22 +3,26 @@
   "version": "1.0.0",
   "description": "On-chain reputation scoring engine for repscore.xyz",
   "type": "module",
-  "main": "src/api/server.ts",
+  "main": "dist/api/server.js",
   "scripts": {
     "build": "echo 'No build step required'",
-    "start": "node --import tsx/esm src/api/server.ts"
+    "start": "node --import tsx/esm src/api/server.ts",
+    "dev": "tsx watch src/api/server.ts",
+    "score": "tsx src/cli.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.18.3",
     "express-rate-limit": "^7.2.0",
     "redis": "^4.6.13",
-    "tsx": "^4.7.0"
+    "nodemailer": "^6.9.9"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/node": "^20.11.0",
-    "typescript": "^5.3.3"
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
+    "@types/nodemailer": "^6.4.14"
   }
 }
