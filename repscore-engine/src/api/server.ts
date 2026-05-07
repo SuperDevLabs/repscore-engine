@@ -544,6 +544,31 @@ const PAYMENT_ADDRESS = process.env.PAYMENT_WALLET || '';
 const REQUIRED_SOL    = 0.01;
 const REQUIRED_LAMPORTS = REQUIRED_SOL * 1e9;
 
+// GET /v1/verified/count — total verified wallets
+app.get("/v1/verified/count", async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    res.json({ count: 0 });
+    return;
+  }
+  try {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/verified_wallets?is_active=eq.true&select=id`,
+      {
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'Prefer': 'count=exact',
+        },
+      }
+    );
+    const countHeader = response.headers.get('content-range');
+    const count = countHeader ? parseInt(countHeader.split('/')[1]) : 0;
+    res.json({ count: isNaN(count) ? 0 : count });
+  } catch {
+    res.json({ count: 0 });
+  }
+});
+
 // GET /v1/verified/:wallet — check if wallet is verified
 app.get("/v1/verified/:wallet", async (req, res) => {
   const { wallet } = req.params;
@@ -903,4 +928,3 @@ app.listen(PORT, () => {
 });
 
 export default app;
-
