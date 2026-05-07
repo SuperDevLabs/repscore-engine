@@ -552,18 +552,17 @@ app.get("/v1/verified/count", async (req, res) => {
   }
   try {
     const response = await fetch(
-      `${SUPABASE_URL}/rest/v1/verified_wallets?is_active=eq.true&select=id`,
+      `${SUPABASE_URL}/rest/v1/verified_wallets?is_active=eq.true&select=wallet`,
       {
         headers: {
           'apikey': SUPABASE_KEY,
           'Authorization': `Bearer ${SUPABASE_KEY}`,
-          'Prefer': 'count=exact',
         },
       }
     );
-    const countHeader = response.headers.get('content-range');
-    const count = countHeader ? parseInt(countHeader.split('/')[1]) : 0;
-    res.json({ count: isNaN(count) ? 0 : count });
+    const data = await response.json();
+    const count = Array.isArray(data) ? data.length : 0;
+    res.json({ count });
   } catch {
     res.json({ count: 0 });
   }
