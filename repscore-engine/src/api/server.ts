@@ -12,7 +12,6 @@ import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
 import { webhookRouter } from "./webhook.ts";
 
 const app = express();
-app.set('trust proxy', 1);
 app.use(express.json());
 
 // ── CORS ──────────────────────────────────────────────────────
@@ -140,6 +139,37 @@ async function logScoreSnapshot(wallet: string, score: any) {
   }
 }
 
+
+// ── Leaderboard upsert ────────────────────────────────────────
+
+async function upsertLeaderboard(wallet: string, score: any) {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return;
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/leaderboard`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'Prefer': 'resolution=merge-duplicates',
+      },
+      body: JSON.stringify({
+        wallet,
+        score: score.score,
+        tier: score.tier,
+        role: score.role,
+        total_launches: score.metadata.totalLaunches,
+        graduated_count: score.metadata.graduatedCount,
+        flag_count: score.flags.length,
+        last_scored_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }),
+    });
+  } catch (err: any) {
+    console.warn('[Supabase] Leaderboard upsert failed:', err.message);
+  }
+}
+
 // ── In-memory analytics log ───────────────────────────────────
 
 const lookupLog: any[] = [];
@@ -194,6 +224,7 @@ app.get("/v1/score/:wallet", publicLimiter, apiKeyLimiter, async (req, res) => {
     const score = await computeRepScore(wallet);
     await setCachedScore(wallet, score);
     logScoreSnapshot(wallet, score);
+    upsertLeaderboard(wallet, score);
 
     res.json({ success: true, data: score, fromCache: false } as ScoreResponse);
   } catch (err: any) {
@@ -354,6 +385,38 @@ app.get("/v1/history/:wallet", async (req, res) => {
   }
 });
 
+// ── Leaderboard endpoint ─────────────────────────────────────
+
+app.get("/v1/leaderboard", async (req, res) => {
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    res.status(503).json({ error: "Leaderboard unavailable" });
+    return;
+  }
+  try {
+    const limit = Math.min(parseInt(req.query.limit as string || "100"), 100);
+    const tier  = req.query.tier as string || '';
+
+    let url = `${SUPABASE_URL}/rest/v1/leaderboard?order=score.desc&limit=${limit}`;
+    if (tier) url += `&tier=eq.${tier}`;
+
+    const response = await fetch(url, {
+      headers: {
+        'apikey': SUPABASE_KEY,
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+      },
+    });
+    const data = await response.json();
+    res.json({
+      success: true,
+      leaderboard: data,
+      total: data.length,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── 404 Handler ───────────────────────────────────────────────
 
 app.use((_req, res) => {
@@ -370,4 +433,3 @@ app.listen(PORT, () => {
 });
 
 export default app;
-
