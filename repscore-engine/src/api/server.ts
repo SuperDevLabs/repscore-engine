@@ -430,72 +430,97 @@ app.get("/v1/token/:mint", publicLimiter, async (req, res) => {
   }
 
   try {
-    // Step 1: Find the deployer from on-chain mint account
-    const heliusRes = await fetch(
-      `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0", id: 1,
-          method: "getAccountInfo",
-          params: [mint, { encoding: "jsonParsed" }],
-        }),
-      }
-    );
-
-    const heliusData = await heliusRes.json();
-    const mintInfo = heliusData?.result?.value?.data?.parsed?.info;
-
     let deployer: string | null = null;
 
-    // Try mint authority first (pre-graduation)
-    if (mintInfo?.mintAuthority) {
-      deployer = mintInfo.mintAuthority;
-    }
-
-    // If no mint authority (renounced/graduated), find from transaction history
-    if (!deployer) {
-      const sigsRes = await fetch(
+    // Strategy 1: Check mint authority (works for non-graduated tokens)
+    try {
+      const heliusRes = await fetch(
         `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             jsonrpc: "2.0", id: 1,
-            method: "getSignaturesForAddress",
-            params: [mint, { limit: 10, commitment: "finalized" }],
+            method: "getAccountInfo",
+            params: [mint, { encoding: "jsonParsed" }],
           }),
         }
       );
-      const sigsData = await sigsRes.json();
-      const sigs = sigsData?.result || [];
+      const heliusData = await heliusRes.json();
+      const mintInfo = heliusData?.result?.value?.data?.parsed?.info;
+      if (mintInfo?.mintAuthority) {
+        deployer = mintInfo.mintAuthority;
+        console.log(`[Token] ${mint.slice(0,8)}... deployer from mintAuthority: ${deployer?.slice(0,8)}`);
+      }
+    } catch {}
 
-      if (sigs.length > 0) {
-        // Get the oldest transaction (token creation)
-        const oldestSig = sigs[sigs.length - 1].signature;
-        const txRes = await fetch(
-          `https://api.helius.xyz/v0/transactions/?api-key=${process.env.HELIUS_API_KEY}`,
+    // Strategy 2: Get ALL signatures and find the oldest (token creation tx)
+    // pump.fun graduated tokens have null mintAuthority so we need this
+    if (!deployer) {
+      try {
+        const sigsRes = await fetch(
+          `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ transactions: [oldestSig] }),
+            body: JSON.stringify({
+              jsonrpc: "2.0", id: 1,
+              method: "getSignaturesForAddress",
+              params: [mint, { limit: 1000, commitment: "finalized" }],
+            }),
           }
         );
-        const txData = await txRes.json();
-        const tx = txData?.[0];
-        if (tx?.feePayer) deployer = tx.feePayer;
-      }
+        const sigsData = await sigsRes.json();
+        const sigs = sigsData?.result || [];
+
+        if (sigs.length > 0) {
+          // Oldest = last item = token creation
+          const oldestSig = sigs[sigs.length - 1].signature;
+          const txRes = await fetch(
+            `https://api.helius.xyz/v0/transactions/?api-key=${process.env.HELIUS_API_KEY}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ transactions: [oldestSig] }),
+            }
+          );
+          const txData = await txRes.json();
+          const tx = txData?.[0];
+          if (tx?.feePayer) {
+            deployer = tx.feePayer;
+            console.log(`[Token] ${mint.slice(0,8)}... deployer from oldest tx feePayer: ${deployer?.slice(0,8)}`);
+          }
+        }
+      } catch {}
+    }
+
+    // Strategy 3: DexScreener — sometimes has maker/deployer info
+    if (!deployer) {
+      try {
+        const dexRes = await fetch(
+          `https://api.dexscreener.com/latest/dex/tokens/${mint}`
+        );
+        if (dexRes.ok) {
+          const dexData = await dexRes.json();
+          const pair = dexData?.pairs?.[0];
+          // Some pairs expose the deployer
+          if (pair?.info?.socials?.deployer) {
+            deployer = pair.info.socials.deployer;
+            console.log(`[Token] ${mint.slice(0,8)}... deployer from DexScreener`);
+          }
+        }
+      } catch {}
     }
 
     if (!deployer) {
-      res.status(404).json({ success: false, error: "Could not find deployer wallet for this token" });
+      console.warn(`[Token] ${mint.slice(0,8)}... could not find deployer`);
+      res.status(404).json({ success: false, error: "Could not find deployer wallet for this token. It may be too new or the mint address may be incorrect." });
       return;
     }
 
-    console.log(`[Token] ${mint.slice(0,8)}... deployer: ${deployer.slice(0,8)}...`);
+    console.log(`[Token] ${mint.slice(0,8)}... scoring deployer: ${deployer.slice(0,8)}...`);
 
-    // Step 2: Score the deployer wallet
+    // Score the deployer
     let score = await getCachedScore(deployer);
     if (!score) {
       score = await computeRepScore(deployer);
@@ -504,12 +529,7 @@ app.get("/v1/token/:mint", publicLimiter, async (req, res) => {
       upsertLeaderboard(deployer, score);
     }
 
-    res.json({
-      success: true,
-      mint,
-      deployer,
-      score,
-    });
+    res.json({ success: true, mint, deployer, score });
 
   } catch (err: any) {
     console.error("[Token] Lookup error:", err.message);
