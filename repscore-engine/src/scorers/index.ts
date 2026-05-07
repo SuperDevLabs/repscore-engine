@@ -420,18 +420,17 @@ export function scoreCommunitySignals(
   }
 
   // Freeze authority
+  // Active freeze authority is NOT a red flag for meme coins.
+  // Revoking it is a small positive (extra trustlessness) but keeping it is neutral.
   const frozenRevoked = launches.filter((l) => l.freezeAuthorityRevoked);
-  if (frozenRevoked.length === launches.length) {
-    raw += 10;
-    signals.push("Freeze authority revoked on all launches");
-  } else if (frozenRevoked.length < launches.length) {
-    raw -= 8;
-    signals.push("Freeze authority not fully revoked");
-    flags.push({
-      severity: "MEDIUM",
-      code: "FREEZE_AUTHORITY_ACTIVE",
-      description: "Freeze authority active — dev can freeze token accounts",
-    });
+  if (frozenRevoked.length === launches.length && launches.length > 0) {
+    raw += 8;
+    signals.push("Freeze authority revoked — fully trustless");
+  } else if (frozenRevoked.length > 0) {
+    raw += 3;
+    signals.push(`Freeze authority revoked on ${frozenRevoked.length}/${launches.length} launches`);
+  } else {
+    signals.push("Freeze authority active (standard for most tokens)");
   }
 
   raw = clamp(raw);
@@ -501,3 +500,4 @@ function formatHours(hours: number): string {
   if (hours < 168)  return `${(hours / 24).toFixed(1)}d`;
   return `${(hours / 168).toFixed(1)}w`;
 }
+
