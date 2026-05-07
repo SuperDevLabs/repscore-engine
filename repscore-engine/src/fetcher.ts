@@ -143,13 +143,10 @@ export async function getTokensDeployedBy(
         tx.type === "CREATE" ||
         tx.type === "TOKEN_MINT" ||
         tx.type === "INITIALIZE_MINT" ||
-        (tx.accountData || []).some((a: any) =>
-          (a.tokenBalanceChanges || []).some(
-            (t: any) =>
-              t.userAccount === wallet &&
-              parseFloat(t.rawTokenAmount?.tokenAmount || "0") > 0
-          )
-        );
+        const isTokenCreation =
+  tx.type === "CREATE" ||
+  tx.type === "TOKEN_MINT" ||
+  tx.type === "INITIALIZE_MINT";
 
       if (!isTokenCreation) continue;
 
