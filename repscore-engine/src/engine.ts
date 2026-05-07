@@ -104,7 +104,7 @@ export async function computeRepScore(wallet: string): Promise<RepScore> {
       launches.length > 0
         ? launches.reduce((a, l) => a + l.holders30d / Math.max(l.peakHolders, 1), 0) / launches.length
         : 0,
-    walletAgeDays,
+    totalTransactions: signatures.length,
     totalVolumeSol,
     lastActivityAt: txns.length > 0
       ? new Date(txns[0].timestamp * 1000).toISOString()
