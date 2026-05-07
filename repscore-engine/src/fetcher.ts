@@ -142,11 +142,7 @@ export async function getTokensDeployedBy(
       const isTokenCreation =
         tx.type === "CREATE" ||
         tx.type === "TOKEN_MINT" ||
-        tx.type === "INITIALIZE_MINT" ||
-        const isTokenCreation =
-  tx.type === "CREATE" ||
-  tx.type === "TOKEN_MINT" ||
-  tx.type === "INITIALIZE_MINT";
+        tx.type === "INITIALIZE_MINT";
 
       if (!isTokenCreation) continue;
 
