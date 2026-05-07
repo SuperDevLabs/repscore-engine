@@ -21,6 +21,7 @@ export interface RepScore {
   components: ScoreComponents;
   flags: ScoreFlag[];
   metadata: ScoreMetadata;
+  totalTransactions: number;
   cachedAt: string;
 }
 
