@@ -99,30 +99,72 @@ export async function getEnhancedTransactions(
 
 // ── Token / Mint Data ─────────────────────────────────────────
 
-export async function getTokensDeployedBy(wallet: string): Promise<string[]> {
+export async function getTokensDeployedBy(
+  wallet: string
+): Promise<{ mint: string; deployedAt: number }[]> {
   // Find all mints where the wallet was the deployer
-  // Helius parses TOKEN_MINT events with type detection
-  const sigs = await getWalletSignatures(wallet, 500);
+  // pump.fun creates tokens as type "CREATE" not "TOKEN_MINT"
+  const sigs = await getWalletSignatures(wallet, 1000);
   if (sigs.length === 0) return [];
 
-  const txns = await getEnhancedTransactions(sigs.slice(0, 200));
-  const mints: string[] = [];
+  // Process in chunks of 200 to cover more history
+  const results: { mint: string; deployedAt: number }[] = [];
+  const seen = new Set<string>();
 
-  for (const tx of txns) {
-    if (tx.type === "TOKEN_MINT" && tx.feePayer === wallet) {
-      // Extract newly created mint from account changes
+  for (let i = 0; i < Math.min(sigs.length, 600); i += 200) {
+    const chunk = sigs.slice(i, i + 200);
+    const txns = await getEnhancedTransactions(chunk);
+
+    for (const tx of txns) {
+      if (!tx || tx.transactionError) continue;
+      if (tx.feePayer !== wallet) continue;
+
+      // Match pump.fun CREATE, TOKEN_MINT, and any token creation type
+      const isTokenCreation =
+        tx.type === "CREATE" ||
+        tx.type === "TOKEN_MINT" ||
+        tx.type === "INITIALIZE_MINT" ||
+        // Also catch raw token program mint initializations
+        (tx.accountData || []).some(
+          (a: any) =>
+            a.tokenBalanceChanges?.length > 0 &&
+            a.tokenBalanceChanges.some(
+              (t: any) =>
+                t.userAccount === wallet &&
+                parseFloat(t.rawTokenAmount?.tokenAmount || "0") > 0
+            )
+        );
+
+      if (!isTokenCreation) continue;
+
+      // Extract mint address from token balance changes
       for (const acct of tx.accountData || []) {
-        if (
-          acct.tokenBalanceChanges?.length > 0 &&
-          acct.tokenBalanceChanges[0].userAccount === wallet
-        ) {
-          mints.push(acct.tokenBalanceChanges[0].mint);
+        for (const change of acct.tokenBalanceChanges || []) {
+          const mint = change.mint;
+          if (
+            mint &&
+            !seen.has(mint) &&
+            // Skip wrapped SOL
+            mint !== "So11111111111111111111111111111111111111112"
+          ) {
+            seen.add(mint);
+            results.push({
+              mint,
+              deployedAt: tx.timestamp || Math.floor(Date.now() / 1000),
+            });
+          }
         }
       }
     }
+
+    // Small delay between chunks
+    if (i + 200 < Math.min(sigs.length, 600)) {
+      await new Promise(r => setTimeout(r, 150));
+    }
   }
 
-  return [...new Set(mints)]; // deduplicate
+  console.log(`[Fetcher] Found ${results.length} token(s) deployed by ${wallet.slice(0,8)}...`);
+  return results;
 }
 
 export async function getTokenHolderCount(mint: string): Promise<number> {
