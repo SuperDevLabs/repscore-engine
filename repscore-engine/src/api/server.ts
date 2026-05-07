@@ -10,6 +10,7 @@ import { computeRepScore } from "../engine.ts";
 import { getCachedScore, setCachedScore, bustCache, getCacheStats } from "../cache.ts";
 import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
 import { webhookRouter } from "./webhook.ts";
+import { sendScoreChangeAlert, sendVerificationEmail } from "./email.js";
 
 const app = express();
 app.use(express.json());
@@ -700,6 +701,12 @@ app.post("/v1/verify/complete", async (req, res) => {
     await bustCache(wallet);
 
     console.log(`[Verify] ✓ Wallet verified: ${wallet.slice(0,8)}...`);
+    // Send verification confirmation email
+    try {
+      await sendVerificationEmail(email, wallet);
+    } catch (emailErr: any) {
+      console.warn('[Email] Verification email failed:', emailErr.message);
+    }
     res.json({ success: true, message: "Wallet verified successfully" });
 
   } catch (err: any) {
@@ -855,6 +862,19 @@ async function checkWatchlistChanges(wallet: string, newScore: any) {
       if (change >= minChange) {
         // Score changed significantly — log it (email sending requires email service)
         console.log(`[Watchlist] Alert: ${wallet.slice(0,8)}... score changed ${watcher.last_score} → ${newScore.score} for ${watcher.email}`);
+        // Send email alert
+        try {
+          await sendScoreChangeAlert(
+            watcher.email,
+            wallet,
+            watcher.last_score,
+            newScore.score,
+            newScore.tier,
+            watcher.label
+          );
+        } catch (emailErr: any) {
+          console.warn('[Email] Alert failed:', emailErr.message);
+        }
         // Update score
         await updateWatchlistScore(watcher.email, wallet, newScore);
       } else {
@@ -883,3 +903,4 @@ app.listen(PORT, () => {
 });
 
 export default app;
+
