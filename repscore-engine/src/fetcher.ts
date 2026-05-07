@@ -2,12 +2,25 @@
 // RepScore Engine — Helius Data Fetcher
 // ============================================================
 
-import { HeliusTransaction, TokenLaunch } from "../types/index.js";
+import { HeliusTransaction } from "../types/index.js";
 
 const HELIUS_RPC = `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
 const HELIUS_API = `https://api.helius.xyz/v0`;
 
-// ── RPC Calls ─────────────────────────────────────────────────
+// Known addresses to skip
+const SKIP_MINTS = new Set([
+  "So11111111111111111111111111111111111111112", // wrapped SOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+]);
+
+const BURN_ADDRESSES = new Set([
+  "1nc1nerator11111111111111111111111111111111",
+  "So11111111111111111111111111111111111111112",
+  "11111111111111111111111111111111",
+]);
+
+// ── Core RPC helper ───────────────────────────────────────────
 
 async function rpcCall(method: string, params: any[]): Promise<any> {
   const res = await fetch(HELIUS_RPC, {
@@ -21,7 +34,11 @@ async function rpcCall(method: string, params: any[]): Promise<any> {
   return data.result;
 }
 
-// ── Wallet Data ───────────────────────────────────────────────
+function sleep(ms: number) {
+  return new Promise(r => setTimeout(r, ms));
+}
+
+// ── Wallet signatures ─────────────────────────────────────────
 
 export async function getWalletSignatures(
   wallet: string,
@@ -34,12 +51,12 @@ export async function getWalletSignatures(
   return (result || []).map((s: any) => s.signature);
 }
 
+// ── Wallet age (paginated) ────────────────────────────────────
+
 export async function getWalletAge(wallet: string): Promise<number> {
-  // Paginates through ALL signatures to find the truly oldest transaction
-  // Fixes the bug where wallets with 1000+ txns appeared newer than they are
   let lastSignature: string | undefined;
   let oldestBlockTime: number | null = null;
-  const MAX_PAGES = 10; // look back up to 10,000 transactions
+  const MAX_PAGES = 10;
 
   for (let page = 0; page < MAX_PAGES; page++) {
     const params: any = { limit: 1000, commitment: "finalized" };
@@ -50,23 +67,17 @@ export async function getWalletAge(wallet: string): Promise<number> {
 
     const oldest = result[result.length - 1];
     if (oldest.blockTime) oldestBlockTime = oldest.blockTime;
-
     if (result.length < 1000) break;
 
     lastSignature = oldest.signature;
-    await new Promise(r => setTimeout(r, 150));
+    await sleep(150);
   }
 
   if (!oldestBlockTime) return 0;
   return Math.floor((Date.now() / 1000 - oldestBlockTime) / 86400);
 }
 
-export async function getSolBalance(wallet: string): Promise<number> {
-  const result = await rpcCall("getBalance", [wallet]);
-  return (result?.value ?? 0) / 1e9;
-}
-
-// ── Transaction Parsing ───────────────────────────────────────
+// ── Enhanced transactions ─────────────────────────────────────
 
 export async function getEnhancedTransactions(
   signatures: string[]
@@ -76,77 +87,77 @@ export async function getEnhancedTransactions(
 
   for (let i = 0; i < signatures.length; i += CHUNK) {
     const chunk = signatures.slice(i, i + CHUNK);
-    const res = await fetch(
-      `${HELIUS_API}/transactions/?api-key=${process.env.HELIUS_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ transactions: chunk }),
+    try {
+      const res = await fetch(
+        `${HELIUS_API}/transactions/?api-key=${process.env.HELIUS_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transactions: chunk }),
+        }
+      );
+      if (!res.ok) {
+        console.warn(`[Fetcher] Enhanced txns failed: ${res.status}`);
+        continue;
       }
-    );
-    if (!res.ok) throw new Error(`Helius transactions API failed: ${res.status}`);
-    const data = await res.json();
-    results.push(...data);
-
-    // Respect rate limits — 100ms between chunks
-    if (i + CHUNK < signatures.length) {
-      await new Promise((r) => setTimeout(r, 100));
+      const data = await res.json();
+      if (Array.isArray(data)) results.push(...data);
+    } catch (err: any) {
+      console.warn(`[Fetcher] Enhanced txns error: ${err.message}`);
     }
+
+    if (i + CHUNK < signatures.length) await sleep(100);
   }
 
   return results;
 }
 
-// ── Token / Mint Data ─────────────────────────────────────────
+// ── Tokens deployed by wallet ─────────────────────────────────
 
 export async function getTokensDeployedBy(
   wallet: string
 ): Promise<{ mint: string; deployedAt: number }[]> {
-  // Find all mints where the wallet was the deployer
-  // pump.fun creates tokens as type "CREATE" not "TOKEN_MINT"
   const sigs = await getWalletSignatures(wallet, 1000);
   if (sigs.length === 0) return [];
 
-  // Process in chunks of 200 to cover more history
   const results: { mint: string; deployedAt: number }[] = [];
   const seen = new Set<string>();
+  const MAX_SIGS = 600;
 
-  for (let i = 0; i < Math.min(sigs.length, 600); i += 200) {
+  for (let i = 0; i < Math.min(sigs.length, MAX_SIGS); i += 200) {
     const chunk = sigs.slice(i, i + 200);
-    const txns = await getEnhancedTransactions(chunk);
+    let txns: any[] = [];
+
+    try {
+      txns = await getEnhancedTransactions(chunk);
+    } catch {
+      continue;
+    }
 
     for (const tx of txns) {
       if (!tx || tx.transactionError) continue;
       if (tx.feePayer !== wallet) continue;
 
-      // Match pump.fun CREATE, TOKEN_MINT, and any token creation type
+      // pump.fun uses type "CREATE", standard SPL uses "TOKEN_MINT"
       const isTokenCreation =
         tx.type === "CREATE" ||
         tx.type === "TOKEN_MINT" ||
         tx.type === "INITIALIZE_MINT" ||
-        // Also catch raw token program mint initializations
-        (tx.accountData || []).some(
-          (a: any) =>
-            a.tokenBalanceChanges?.length > 0 &&
-            a.tokenBalanceChanges.some(
-              (t: any) =>
-                t.userAccount === wallet &&
-                parseFloat(t.rawTokenAmount?.tokenAmount || "0") > 0
-            )
+        (tx.accountData || []).some((a: any) =>
+          (a.tokenBalanceChanges || []).some(
+            (t: any) =>
+              t.userAccount === wallet &&
+              parseFloat(t.rawTokenAmount?.tokenAmount || "0") > 0
+          )
         );
 
       if (!isTokenCreation) continue;
 
-      // Extract mint address from token balance changes
+      // Extract mint from token balance changes
       for (const acct of tx.accountData || []) {
         for (const change of acct.tokenBalanceChanges || []) {
           const mint = change.mint;
-          if (
-            mint &&
-            !seen.has(mint) &&
-            // Skip wrapped SOL
-            mint !== "So11111111111111111111111111111111111111112"
-          ) {
+          if (mint && !seen.has(mint) && !SKIP_MINTS.has(mint)) {
             seen.add(mint);
             results.push({
               mint,
@@ -157,69 +168,74 @@ export async function getTokensDeployedBy(
       }
     }
 
-    // Small delay between chunks
-    if (i + 200 < Math.min(sigs.length, 600)) {
-      await new Promise(r => setTimeout(r, 150));
-    }
+    if (i + 200 < Math.min(sigs.length, MAX_SIGS)) await sleep(150);
   }
 
-  console.log(`[Fetcher] Found ${results.length} token(s) deployed by ${wallet.slice(0,8)}...`);
+  console.log(`[Fetcher] Found ${results.length} token(s) deployed by ${wallet.slice(0, 8)}...`);
   return results;
 }
 
+// ── Token holder count ────────────────────────────────────────
+// Uses getProgramAccounts with filters to avoid the 5M account limit
+
 export async function getTokenHolderCount(mint: string): Promise<number> {
-  const result = await rpcCall("getTokenLargestAccounts", [mint]);
-  const accounts = result?.value ?? [];
+  try {
+    // Use getTokenLargestAccounts which is safe — max 20 results
+    const result = await rpcCall("getTokenLargestAccounts", [
+      mint,
+      { commitment: "finalized" },
+    ]);
+    const accounts = result?.value ?? [];
 
-  const BURN_ADDRESSES = [
-    "1nc1nerator11111111111111111111111111111111",
-    "So11111111111111111111111111111111111111112",
-    "11111111111111111111111111111111",
-  ];
+    if (accounts.length === 0) return 0;
 
-  const totalAmount = accounts.reduce(
-    (sum: number, a: any) => sum + parseFloat(a.uiAmount || 0), 0
-  );
-  if (totalAmount === 0) return 0;
+    const totalAmount = accounts.reduce(
+      (sum: number, a: any) => sum + parseFloat(a.uiAmount || 0), 0
+    );
+    if (totalAmount === 0) return 0;
 
-  const MIN_HOLDING_PCT = 0.0001; // 0.01% of supply minimum
-  const MIN_HOLDING_ABS = 1000;   // 1,000 tokens absolute minimum
+    const MIN_PCT = 0.0001;   // 0.01% of supply
+    const MIN_ABS = 1000;     // 1,000 tokens absolute
 
-  const realHolders = accounts.filter((a: any) => {
-    if (BURN_ADDRESSES.includes(a.address)) return false;
-    const amount = parseFloat(a.uiAmount || 0);
-    const pct = amount / totalAmount;
-    if (pct < MIN_HOLDING_PCT) return false;
-    if (amount < MIN_HOLDING_ABS) return false;
-    return true;
-  });
+    const realHolders = accounts.filter((a: any) => {
+      if (BURN_ADDRESSES.has(a.address)) return false;
+      const amount = parseFloat(a.uiAmount || 0);
+      return (amount / totalAmount) >= MIN_PCT && amount >= MIN_ABS;
+    });
 
-  return realHolders.length;
+    return realHolders.length;
+  } catch (err: any) {
+    console.warn(`[Fetcher] getTokenHolderCount failed for ${mint.slice(0,8)}: ${err.message}`);
+    return 0;
+  }
 }
+
+// ── Token metadata ────────────────────────────────────────────
 
 export async function getTokenMetadata(mint: string): Promise<{
   mintRenounced: boolean;
   freezeAuthorityRevoked: boolean;
   supply: number;
 }> {
-  const result = await rpcCall("getAccountInfo", [
-    mint,
-    { encoding: "jsonParsed" },
-  ]);
+  try {
+    const result = await rpcCall("getAccountInfo", [
+      mint,
+      { encoding: "jsonParsed" },
+    ]);
+    const info = result?.value?.data?.parsed?.info;
+    if (!info) return { mintRenounced: false, freezeAuthorityRevoked: false, supply: 0 };
 
-  const info = result?.value?.data?.parsed?.info;
-  if (!info) {
+    return {
+      mintRenounced: info.mintAuthority === null,
+      freezeAuthorityRevoked: info.freezeAuthority === null,
+      supply: parseInt(info.supply || "0"),
+    };
+  } catch {
     return { mintRenounced: false, freezeAuthorityRevoked: false, supply: 0 };
   }
-
-  return {
-    mintRenounced: info.mintAuthority === null,
-    freezeAuthorityRevoked: info.freezeAuthority === null,
-    supply: parseInt(info.supply || "0"),
-  };
 }
 
-// ── DexScreener LP Data ───────────────────────────────────────
+// ── LP data from DexScreener ──────────────────────────────────
 
 export async function getLpData(mint: string): Promise<{
   initialLpSol: number;
@@ -237,15 +253,12 @@ export async function getLpData(mint: string): Promise<{
     if (!pair) return defaultLpData();
 
     const liquidityUsd = pair.liquidity?.usd ?? 0;
-    const solPrice = 150; // approximate — replace with live feed in production
-    const initialLpSol = liquidityUsd / solPrice;
-    const stillActive = liquidityUsd > 500; // $500 min liquidity threshold
-
+    const solPrice = 150;
     return {
-      initialLpSol,
-      lpLockDays: null,    // Requires dedicated LP lock indexer (e.g. Streamflow)
-      lpPulledAt: null,    // Inferred from liquidity cliff detection below
-      stillActive,
+      initialLpSol: liquidityUsd / solPrice,
+      lpLockDays: null,
+      lpPulledAt: null,
+      stillActive: liquidityUsd > 500,
     };
   } catch {
     return defaultLpData();
@@ -256,25 +269,25 @@ function defaultLpData() {
   return { initialLpSol: 0, lpLockDays: null, lpPulledAt: null, stillActive: false };
 }
 
-// ── Rug Detection ─────────────────────────────────────────────
+// ── Rug detection ─────────────────────────────────────────────
 
 export async function detectLiquidityPull(
   mint: string,
   deployedAt: number
 ): Promise<{ wasRugged: boolean; ruggedAt: number | null }> {
-  // Heuristic: if token had liquidity but now has <$200, and it was
-  // within 72h of launch — flag as rug
-  const lp = await getLpData(mint);
-  const ageHours = (Date.now() / 1000 - deployedAt) / 3600;
-
-  if (!lp.stillActive && ageHours < 72) {
-    return { wasRugged: true, ruggedAt: deployedAt + ageHours * 3600 };
+  try {
+    const lp = await getLpData(mint);
+    const ageHours = (Date.now() / 1000 - deployedAt) / 3600;
+    if (!lp.stillActive && ageHours < 72) {
+      return { wasRugged: true, ruggedAt: deployedAt + ageHours * 3600 };
+    }
+    return { wasRugged: false, ruggedAt: null };
+  } catch {
+    return { wasRugged: false, ruggedAt: null };
   }
-
-  return { wasRugged: false, ruggedAt: null };
 }
 
-// ── Volume & Activity ─────────────────────────────────────────
+// ── Wallet volume ─────────────────────────────────────────────
 
 export async function getWalletVolume(
   txns: HeliusTransaction[],
@@ -294,27 +307,23 @@ export async function getWalletVolume(
   return totalSol;
 }
 
-// ── Linked Wallet Detection ───────────────────────────────────
+// ── Linked wallet detection ───────────────────────────────────
 
 export async function detectLinkedWallets(
   wallet: string,
   txns: HeliusTransaction[]
 ): Promise<string[]> {
-  // Find wallets that funded this wallet within 24h of its first tx
   const fundingWallets = new Set<string>();
-
   for (const tx of txns) {
     for (const transfer of tx.nativeTransfers || []) {
       if (
         transfer.toUserAccount === wallet &&
-        transfer.amount / 1e9 > 0.1 // meaningful funding
+        transfer.amount / 1e9 > 0.1 &&
+        transfer.fromUserAccount !== wallet
       ) {
-        if (transfer.fromUserAccount !== wallet) {
-          fundingWallets.add(transfer.fromUserAccount);
-        }
+        fundingWallets.add(transfer.fromUserAccount);
       }
     }
   }
-
-  return [...fundingWallets].slice(0, 10); // top 10 funding sources
+  return [...fundingWallets].slice(0, 10);
 }
