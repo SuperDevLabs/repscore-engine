@@ -418,6 +418,105 @@ app.get("/v1/leaderboard", async (req, res) => {
   }
 });
 
+// ── Token lookup endpoint ─────────────────────────────────────
+// Finds deployer wallet from mint address and returns their score
+
+app.get("/v1/token/:mint", publicLimiter, async (req, res) => {
+  const { mint } = req.params;
+
+  if (!isValidSolanaAddress(mint)) {
+    res.status(400).json({ success: false, error: "Invalid mint address" });
+    return;
+  }
+
+  try {
+    // Step 1: Find the deployer from on-chain mint account
+    const heliusRes = await fetch(
+      `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1,
+          method: "getAccountInfo",
+          params: [mint, { encoding: "jsonParsed" }],
+        }),
+      }
+    );
+
+    const heliusData = await heliusRes.json();
+    const mintInfo = heliusData?.result?.value?.data?.parsed?.info;
+
+    let deployer: string | null = null;
+
+    // Try mint authority first (pre-graduation)
+    if (mintInfo?.mintAuthority) {
+      deployer = mintInfo.mintAuthority;
+    }
+
+    // If no mint authority (renounced/graduated), find from transaction history
+    if (!deployer) {
+      const sigsRes = await fetch(
+        `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0", id: 1,
+            method: "getSignaturesForAddress",
+            params: [mint, { limit: 10, commitment: "finalized" }],
+          }),
+        }
+      );
+      const sigsData = await sigsRes.json();
+      const sigs = sigsData?.result || [];
+
+      if (sigs.length > 0) {
+        // Get the oldest transaction (token creation)
+        const oldestSig = sigs[sigs.length - 1].signature;
+        const txRes = await fetch(
+          `https://api.helius.xyz/v0/transactions/?api-key=${process.env.HELIUS_API_KEY}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ transactions: [oldestSig] }),
+          }
+        );
+        const txData = await txRes.json();
+        const tx = txData?.[0];
+        if (tx?.feePayer) deployer = tx.feePayer;
+      }
+    }
+
+    if (!deployer) {
+      res.status(404).json({ success: false, error: "Could not find deployer wallet for this token" });
+      return;
+    }
+
+    console.log(`[Token] ${mint.slice(0,8)}... deployer: ${deployer.slice(0,8)}...`);
+
+    // Step 2: Score the deployer wallet
+    let score = await getCachedScore(deployer);
+    if (!score) {
+      score = await computeRepScore(deployer);
+      await setCachedScore(deployer, score);
+      logScoreSnapshot(deployer, score);
+      upsertLeaderboard(deployer, score);
+    }
+
+    res.json({
+      success: true,
+      mint,
+      deployer,
+      score,
+    });
+
+  } catch (err: any) {
+    console.error("[Token] Lookup error:", err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Watchlist endpoints ───────────────────────────────────────
 
 // GET /v1/watchlist?email=xxx — get all watched wallets for email
@@ -593,4 +692,3 @@ app.listen(PORT, () => {
 });
 
 export default app;
-
