@@ -15,13 +15,12 @@ export type WalletRole = "DEV" | "TRADER" | "BOTH" | "UNKNOWN";
 
 export interface RepScore {
   wallet: string;
-  score: number;
+  score: number;          // 0–1000
   tier: ScoreTier;
   role: WalletRole;
   components: ScoreComponents;
   flags: ScoreFlag[];
   metadata: ScoreMetadata;
-  totalTransactions: number;
   cachedAt: string;
 }
 
@@ -58,6 +57,11 @@ export interface ScoreMetadata {
   totalTransactions: number;
   totalVolumeSol: number;
   lastActivityAt: string;
+  // ── v2 additions ──
+  holderConcentrationGini: number | null;   // avg Gini coefficient across launches (0=equal, 1=whale)
+  crossTokenHolderOverlap: number;          // fraction of holders shared across launches (0–1)
+  walletClusterSize: number;                // total linked wallets found across 2 hops
+  sociallyVerified: boolean;                // wallet has completed social verification
 }
 
 // ── TokenLaunch — pump.fun native ────────────────────────────
@@ -65,7 +69,7 @@ export interface ScoreMetadata {
 export interface TokenLaunch {
   mint: string;
   deployer: string;
-  deployedAt: number;
+  deployedAt: number;             // unix timestamp
 
   // Longevity
   lastActivityAt: number;
@@ -74,9 +78,9 @@ export interface TokenLaunch {
 
   // Dev token lock (Streamflow / Realms — voluntary)
   devTokensLocked: boolean;
-  devLockDays: number | null;          // how long tokens are locked
-  devLockPct: number | null;           // what % of dev allocation is locked
-  devSoldBeforeLockExpiry: boolean;    // dumped before lock expired
+  devLockDays: number | null;
+  devLockPct: number | null;
+  devSoldBeforeLockExpiry: boolean;
 
   // Dev wallet behavior
   devAllocationPct: number;
@@ -85,7 +89,7 @@ export interface TokenLaunch {
   selfSniped: boolean;
 
   // Post-graduation LP (Raydium — dev CAN control this)
-  postGradLpLocked: boolean;           // locked Raydium LP after graduation
+  postGradLpLocked: boolean;
   postGradLpLockDays: number | null;
   postGradLpPulled: boolean;
   postGradLpPulledHours: number | null;
@@ -100,116 +104,13 @@ export interface TokenLaunch {
   mintRenounced: boolean;
   freezeAuthorityRevoked: boolean;
   telegramDeleted: boolean;
-}
 
-// ── API types ─────────────────────────────────────────────────
-
-export interface ScoreRequest {
-  wallet: string;
-  forceRefresh?: boolean;
-}
-
-export interface ScoreResponse {
-  success: boolean;
-  data?: RepScore;
-  error?: string;
-  fromCache?: boolean;
-}
-
-export interface BatchScoreRequest {
-  wallets: string[];
-  forceRefresh?: boolean;
-}
-
-export interface BatchScoreResponse {
-  success: boolean;
-  results: Record<string, ScoreResponse>;
-  errors: Record<string, string>;
-}
-
-  | "BLACKLISTED";
-
-export type WalletRole = "DEV" | "TRADER" | "BOTH" | "UNKNOWN";
-
-export interface RepScore {
-  wallet: string;
-  score: number;          // 0–1000
-  tier: ScoreTier;
-  role: WalletRole;
-  components: ScoreComponents;
-  flags: ScoreFlag[];
-  metadata: ScoreMetadata;
-  cachedAt: string;
-}
-
-export interface ScoreComponents {
-  launchHistory:     ComponentScore; // 30%
-  liquidityBehavior: ComponentScore; // 25%
-  holderRetention:   ComponentScore; // 20%
-  communitySignals:  ComponentScore; // 15%
-  walletHistory:     ComponentScore; // 10%
-}
-
-export interface ComponentScore {
-  raw: number;
-  weighted: number;
-  weight: number;
-  signals: string[];
-}
-
-export interface ScoreFlag {
-  severity: "CRITICAL" | "HIGH" | "MEDIUM" | "LOW";
-  code: string;
-  description: string;
-  detectedAt?: string;
-}
-
-export interface ScoreMetadata {
-  totalLaunches: number;
-  successfulLaunches: number;
-  rugCount: number;
-  graduatedCount: number;       // bonded to Raydium
-  avgLongevityHours: number;    // pump.fun reality — hours not days
-  avgHolderRetention7d: number;
-  avgHolderRetention30d: number;
-  walletAgeDays: number;
-  totalVolumeSol: number;
-  lastActivityAt: string;
+  // ── v2 additions ──
+  decayWeight: number;              // time-decay weight (higher = more recent launch)
+  giniCoefficient: number | null;   // holder concentration for this token (populated after fetch)
 }
 
 // ── Raw on-chain data structures ──────────────────────────────
-
-export interface TokenLaunch {
-  mint: string;
-  deployer: string;
-  deployedAt: number;             // unix timestamp
-
-  // Longevity — pump.fun tiered milestones
-  lastActivityAt: number;         // unix timestamp of last meaningful tx
-  survivedHours: number;          // how long the token stayed alive
-  graduated: boolean;             // bonded to Raydium
-
-  // Dev wallet behavior
-  devAllocationPct: number;       // % of supply held at launch
-  devFirstSellHours: number | null; // hours after launch before first dev sell
-  devSoldPct50InFirstHour: boolean; // dumped >50% in first hour
-  selfSniped: boolean;            // dev wallet bought with bot pre-launch
-
-  // Post-graduation LP (Raydium only — pump.fun LP is protocol-controlled)
-  postGradLpPulled: boolean;
-  postGradLpPulledHours: number | null; // hours after graduation
-
-  // Holders
-  peakHolders: number;
-  holders7d: number;
-  holders30d: number;
-  holders90d: number;
-
-  // On-chain hygiene
-  mintRenounced: boolean;
-  freezeAuthorityRevoked: boolean;
-  telegramDeleted: boolean;
-}
 
 export interface HeliusTransaction {
   signature: string;
