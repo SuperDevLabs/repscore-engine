@@ -910,6 +910,32 @@ async function checkWatchlistChanges(wallet: string, newScore: any) {
     console.warn('[Watchlist] Check failed:', err.message);
   }
 }
+// ── Legacy route aliases (for repscore.xyz frontend) ─────────
+// Frontend calls /score/:wallet — redirect to /v1/score/:wallet
+
+app.get("/score/:wallet", publicLimiter, async (req, res) => {
+  const { wallet } = req.params;
+  const forceRefresh = req.query.refresh === "true";
+
+  if (!isValidSolanaAddress(wallet)) {
+    res.status(400).json({ success: false, error: "Invalid Solana wallet address" });
+    return;
+  }
+
+  try {
+    let score = forceRefresh ? null : await getCachedScore(wallet);
+    const fromCache = !!score;
+    if (!score) {
+      score = await computeRepScore(wallet);
+      await setCachedScore(wallet, score);
+      logScoreSnapshot(wallet, score);
+      upsertLeaderboard(wallet, score);
+    }
+    res.json({ success: true, data: score, fromCache });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
 
 // ── 404 Handler ───────────────────────────────────────────────
 
