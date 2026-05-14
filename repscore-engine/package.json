@@ -4,6 +4,9 @@
   "description": "On-chain reputation scoring engine for repscore.xyz",
   "type": "module",
   "main": "dist/api/server.js",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "build": "echo 'No build step required'",
     "start": "node --import tsx/esm src/api/server.ts",
