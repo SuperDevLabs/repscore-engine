@@ -320,3 +320,66 @@ export async function detectLinkedWallets(
   }
   return [...fundingWallets].slice(0, 10);
 }
+// ============================================================
+// RepScore Engine — Fetcher additions for v2
+// Add this to the BOTTOM of your existing fetcher.ts
+// (getTokenLargestHolders is new)
+// Also update getWalletSignatures default limit from 600 → 1000
+// in the engine.ts call (already done in engine.ts v2)
+// ============================================================
+
+// ── Token largest holders with addresses ──────────────────────
+// Returns top 20 holders with address + balance.
+// Used by engine.ts to compute Gini coefficient and
+// cross-token holder overlap sets.
+
+export async function getTokenLargestHolders(
+  mint: string
+): Promise<{ address: string; balance: number }[]> {
+  const BURN_ADDRESSES = new Set([
+    "1nc1nerator11111111111111111111111111111111",
+    "So11111111111111111111111111111111111111112",
+    "11111111111111111111111111111111",
+    // pump.fun bonding curve vault — not a real holder
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ35MKDkc4i3", // pump.fun program
+  ]);
+
+  try {
+    const res = await fetch(
+      `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 1,
+          method: "getTokenLargestAccounts",
+          params: [mint, { commitment: "finalized" }],
+        }),
+      }
+    );
+    if (!res.ok) return [];
+    const data = await res.json();
+    const accounts = data?.result?.value ?? [];
+    if (accounts.length === 0) return [];
+
+    const totalAmount = accounts.reduce(
+      (sum: number, a: any) => sum + parseFloat(a.uiAmount || 0), 0
+    );
+    if (totalAmount === 0) return [];
+
+    return accounts
+      .filter((a: any) => {
+        if (BURN_ADDRESSES.has(a.address)) return false;
+        const amount = parseFloat(a.uiAmount || 0);
+        // Must hold at least 0.01% of supply
+        return (amount / totalAmount) >= 0.0001 && amount > 0;
+      })
+      .map((a: any) => ({
+        address: a.address,
+        balance: parseFloat(a.uiAmount || 0),
+      }));
+  } catch (err: any) {
+    console.warn(`[Fetcher] getTokenLargestHolders failed for ${mint.slice(0, 8)}: ${err.message}`);
+    return [];
+  }
+}
