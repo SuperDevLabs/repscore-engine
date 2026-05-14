@@ -19,12 +19,12 @@ app.use(express.json());
 
 app.use(cors({
   origin: [
-    "https://repscore.xyz",
-    "https://www.repscore.xyz",
-    "https://fortressofsolitude.pro",
-    ...(process.env.NODE_ENV === "development" ? ["http://localhost:3000", "http://localhost:5173"] : []),
+    'https://repscore.xyz',
+    'https://www.repscore.xyz',
+    'http://localhost:3000'
   ],
-  methods: ["GET", "POST"],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 // ── Rate limiting ─────────────────────────────────────────────
