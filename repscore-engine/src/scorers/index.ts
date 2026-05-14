@@ -1,22 +1,22 @@
 // ============================================================
-// RepScore Engine — Score Modules (pump.fun native)
-// Each scorer returns a ComponentScore (raw 0–100 + signals)
+// RepScore Engine — Score Modules v2
+// Changes: time-decay weighting throughout, Gini coefficient
+// in holder retention, cluster signals in wallet history,
+// cross-token overlap in community signals
 // ============================================================
 
 import { ComponentScore, ScoreFlag, TokenLaunch } from "../types/index.js";
 
 // ── Longevity tier thresholds (hours) ─────────────────────────
-// 99% of pump.fun tokens die within an hour.
-// Surviving any meaningful time is a signal of quality.
 
 const LONGEVITY_TIERS = [
-  { hours: 168, points: 50, label: "7d+"  },  // 7 days  — elite
-  { hours:  72, points: 35, label: "72h+" },  // 3 days  — exceptional
-  { hours:  48, points: 28, label: "48h+" },  // 2 days  — very strong
-  { hours:  24, points: 20, label: "24h+" },  // 1 day   — genuinely rare
-  { hours:   8, points: 12, label: "8h+"  },  // 8 hours — top 5%
-  { hours:   4, points:  8, label: "4h+"  },  // 4 hours — top 10%
-  { hours:   1, points:  2, label: "1h+"  },  // 1 hour  — baseline
+  { hours: 168, points: 50, label: "7d+"  },
+  { hours:  72, points: 35, label: "72h+" },
+  { hours:  48, points: 28, label: "48h+" },
+  { hours:  24, points: 20, label: "24h+" },
+  { hours:   8, points: 12, label: "8h+"  },
+  { hours:   4, points:  8, label: "4h+"  },
+  { hours:   1, points:  2, label: "1h+"  },
 ];
 
 function longevityPoints(hours: number): { points: number; label: string } {
@@ -26,7 +26,7 @@ function longevityPoints(hours: number): { points: number; label: string } {
   return { points: 0, label: "<1h" };
 }
 
-// ── 1. Launch History (30%) ───────────────────────────────────
+// ── 1. Launch History (30%) — with time-decay ─────────────────
 
 export function scoreLaunchHistory(
   launches: TokenLaunch[],
@@ -39,34 +39,40 @@ export function scoreLaunchHistory(
     return { raw: 40, weighted: 40 * 0.3, weight: 0.3, signals };
   }
 
-  // ── Longevity scoring ──
-  // Each token earns points based on how long it survived.
-  // Points are cumulative — a 7d token earns all tiers below it.
-  // Average across all launches = the longevity score (0–50).
+  // ── Time-decay weighted longevity ──
+  // Recent launches count more than old ones.
+  // A rug 2 years ago hurts much less than one last month.
+  let weightedLongevityPoints = 0;
+  let totalWeight = 0;
 
   const longevityScores = launches.map((l) => {
     const { points, label } = longevityPoints(l.survivedHours);
+    const w = l.decayWeight ?? 1;
+    weightedLongevityPoints += points * w;
+    totalWeight += w;
     return { points, label, hours: l.survivedHours };
   });
 
-  const avgLongevityPoints =
-    longevityScores.reduce((a, s) => a + s.points, 0) / launches.length;
+  const avgLongevityPoints = totalWeight > 0
+    ? weightedLongevityPoints / totalWeight
+    : 0;
 
-  // Scale 0–50 longevity points → 0–60 raw score contribution
   let raw = Math.round((avgLongevityPoints / 50) * 60);
 
-  // Longevity breakdown signal
   const best = longevityScores.reduce((a, b) => (b.hours > a.hours ? b : a));
   const avgHours = longevityScores.reduce((a, s) => a + s.hours, 0) / launches.length;
-  signals.push(`Avg longevity: ${formatHours(avgHours)}`);
+  signals.push(`Avg longevity: ${formatHours(avgHours)} (decay-weighted)`);
   signals.push(`Best token: ${formatHours(best.hours)} (${best.label})`);
 
-  // ── Graduation bonus ──
-  const graduated = launches.filter((l) => l.graduated);
-  if (graduated.length > 0) {
-    const gradBonus = Math.min(graduated.length * 8, 24);
+  // ── Graduation bonus (decay-weighted) ──
+  const graduatedWeight = launches
+    .filter((l) => l.graduated)
+    .reduce((a, l) => a + (l.decayWeight ?? 1), 0);
+  const gradBonus = Math.min(Math.round(graduatedWeight * 40), 24);
+  if (gradBonus > 0) {
     raw += gradBonus;
-    signals.push(`${graduated.length} token(s) graduated to Raydium`);
+    const graduatedCount = launches.filter((l) => l.graduated).length;
+    signals.push(`${graduatedCount} token(s) graduated to Raydium`);
   }
 
   // ── Volume / launch count bonuses ──
@@ -74,14 +80,18 @@ export function scoreLaunchHistory(
   else if (launches.length >= 5) { raw += 4; signals.push(`${launches.length} launches`); }
   else { signals.push(`${launches.length} launch(es) on record`); }
 
-  // ── Dev dump penalties ──
-  // If the dev dumped within the first hour on most launches, that tanks the score
-  // regardless of how long the token "survived" on paper.
+  // ── Dev dump penalties (time-decay weighted) ──
+  // Recent dumps are far more damaging than old ones.
+  let weightedDumpPenalty = 0;
   const earlyDumps = launches.filter((l) => l.devSoldPct50InFirstHour);
+  earlyDumps.forEach((l) => {
+    weightedDumpPenalty += 15 * (l.decayWeight ?? 1) * launches.length;
+  });
   if (earlyDumps.length > 0) {
-    const dumpPenalty = Math.min(earlyDumps.length * 15, 40);
-    raw -= dumpPenalty;
-    signals.push(`Dev dumped >50% in first hour on ${earlyDumps.length} launch(es)`);
+    const penalty = Math.min(Math.round(weightedDumpPenalty), 40);
+    raw -= penalty;
+    const recency = earlyDumps.some((l) => (l.decayWeight ?? 0) > 0.8) ? " (recent)" : " (historical)";
+    signals.push(`Dev dumped >50% in first hour on ${earlyDumps.length} launch(es)${recency}`);
     if (earlyDumps.length >= 2) {
       flags.push({
         severity: "CRITICAL",
@@ -91,10 +101,14 @@ export function scoreLaunchHistory(
     }
   }
 
-  // ── Self-snipe penalty ──
+  // ── Self-snipe penalty (decay-weighted) ──
   const sniped = launches.filter((l) => l.selfSniped);
   if (sniped.length > 0) {
-    raw -= Math.min(sniped.length * 10, 25);
+    const snipePenalty = Math.min(
+      Math.round(sniped.reduce((a, l) => a + 10 * (l.decayWeight ?? 1) * launches.length, 0)),
+      25
+    );
+    raw -= snipePenalty;
     signals.push(`Self-sniping detected on ${sniped.length} launch(es)`);
     flags.push({
       severity: "HIGH",
@@ -107,11 +121,7 @@ export function scoreLaunchHistory(
   return { raw, weighted: raw * 0.3, weight: 0.3, signals };
 }
 
-// ── 2. Liquidity Behavior (25%) — pump.fun native ─────────────
-// pump.fun controls LP during bonding curve — devs CANNOT lock it.
-// Devs CAN lock their token allocation via Streamflow/Realms.
-// After graduation, devs CAN lock Raydium LP.
-// We score what devs actually control.
+// ── 2. Liquidity Behavior (25%) ───────────────────────────────
 
 export function scoreLiquidityBehavior(
   launches: TokenLaunch[],
@@ -120,19 +130,12 @@ export function scoreLiquidityBehavior(
   const signals: string[] = [];
 
   if (launches.length === 0) {
-    return {
-      raw: 40,
-      weighted: 40 * 0.25,
-      weight: 0.25,
-      signals: ["No launches to evaluate"],
-    };
+    return { raw: 40, weighted: 40 * 0.25, weight: 0.25, signals: ["No launches to evaluate"] };
   }
 
   let raw = 50;
 
-  // ── Dev token locks (Streamflow / Realms) ──
-  // Voluntarily locking dev allocation is the strongest trust signal.
-  // Nobody forces this — doing it is a real commitment.
+  // ── Dev token locks ──
   const lockedLaunches = launches.filter((l) => l.devTokensLocked);
   if (lockedLaunches.length === launches.length && launches.length > 0) {
     raw += 20;
@@ -148,38 +151,25 @@ export function scoreLiquidityBehavior(
   const locksWithDuration = launches.filter((l) => l.devLockDays !== null);
   if (locksWithDuration.length > 0) {
     const avgLockDays = locksWithDuration.reduce((a, l) => a + (l.devLockDays ?? 0), 0) / locksWithDuration.length;
-    if (avgLockDays >= 180) {
-      raw += 20;
-      signals.push(`Avg dev token lock: ${Math.round(avgLockDays)}d — strong commitment`);
-    } else if (avgLockDays >= 90) {
-      raw += 14;
-      signals.push(`Avg dev token lock: ${Math.round(avgLockDays)}d`);
-    } else if (avgLockDays >= 30) {
-      raw += 8;
-      signals.push(`Avg dev token lock: ${Math.round(avgLockDays)}d`);
-    } else {
-      raw += 3;
-      signals.push(`Short dev token lock: avg ${Math.round(avgLockDays)}d`);
-    }
+    if (avgLockDays >= 180)     { raw += 20; signals.push(`Avg dev token lock: ${Math.round(avgLockDays)}d — strong commitment`); }
+    else if (avgLockDays >= 90) { raw += 14; signals.push(`Avg dev token lock: ${Math.round(avgLockDays)}d`); }
+    else if (avgLockDays >= 30) { raw += 8;  signals.push(`Avg dev token lock: ${Math.round(avgLockDays)}d`); }
+    else                        { raw += 3;  signals.push(`Short dev token lock: avg ${Math.round(avgLockDays)}d`); }
   }
 
-  // Lock % bonus — locking 100% of allocation is ideal
+  // Lock % bonus
   const locksWithPct = launches.filter((l) => l.devLockPct !== null);
   if (locksWithPct.length > 0) {
     const avgLockPct = locksWithPct.reduce((a, l) => a + (l.devLockPct ?? 0), 0) / locksWithPct.length;
-    if (avgLockPct >= 90) {
-      raw += 10;
-      signals.push(`${Math.round(avgLockPct)}% of dev allocation locked`);
-    } else if (avgLockPct >= 50) {
-      raw += 5;
-      signals.push(`${Math.round(avgLockPct)}% of dev allocation locked`);
-    }
+    if (avgLockPct >= 90)      { raw += 10; signals.push(`${Math.round(avgLockPct)}% of dev allocation locked`); }
+    else if (avgLockPct >= 50) { raw += 5;  signals.push(`${Math.round(avgLockPct)}% of dev allocation locked`); }
   }
 
-  // Sold before lock expired — worst possible signal
+  // Sold before lock expired — worst signal, decay-amplified if recent
   const soldBeforeExpiry = launches.filter((l) => l.devSoldBeforeLockExpiry);
   if (soldBeforeExpiry.length > 0) {
-    raw -= soldBeforeExpiry.length * 25;
+    const penalty = soldBeforeExpiry.reduce((a, l) => a + 25 * (l.decayWeight ?? 1) * launches.length, 0);
+    raw -= Math.min(Math.round(penalty), 60);
     signals.push(`Dev sold before lock expired on ${soldBeforeExpiry.length} launch(es)`);
     flags.push({
       severity: "CRITICAL",
@@ -191,94 +181,57 @@ export function scoreLiquidityBehavior(
   // ── Graduation rate ──
   const graduated = launches.filter((l) => l.graduated);
   const gradRate = graduated.length / launches.length;
-  if (gradRate >= 0.5) {
-    raw += 15;
-    signals.push(`${pct(gradRate)} graduation rate to Raydium`);
-  } else if (gradRate > 0) {
-    raw += Math.round(gradRate * 15);
-    signals.push(`${graduated.length}/${launches.length} tokens graduated to Raydium`);
-  } else {
-    signals.push("No tokens graduated to Raydium");
-  }
+  if (gradRate >= 0.5)     { raw += 15; signals.push(`${pct(gradRate)} graduation rate to Raydium`); }
+  else if (gradRate > 0)   { raw += Math.round(gradRate * 15); signals.push(`${graduated.length}/${launches.length} tokens graduated`); }
+  else                     { signals.push("No tokens graduated to Raydium"); }
 
-  // ── Post-graduation Raydium LP lock ──
-  // After graduation devs CAN lock Raydium LP — reward them for it
+  // Post-graduation LP lock
   const postGradLocked = launches.filter((l) => l.graduated && l.postGradLpLocked);
   if (postGradLocked.length > 0) {
     raw += Math.min(postGradLocked.length * 8, 16);
-    const avgPostLockDays = postGradLocked
-      .filter((l) => l.postGradLpLockDays !== null)
+    const avgPostLockDays = postGradLocked.filter((l) => l.postGradLpLockDays !== null)
       .reduce((a, l) => a + (l.postGradLpLockDays ?? 0), 0) / postGradLocked.length;
     signals.push(`Raydium LP locked on ${postGradLocked.length} graduated token(s)${avgPostLockDays > 0 ? ` (avg ${Math.round(avgPostLockDays)}d)` : ''}`);
   }
 
-  // ── Post-graduation LP pulls ──
+  // Post-graduation LP pulls (decay-weighted — recent pulls hurt far more)
   const postGradPulls = launches.filter((l) => l.graduated && l.postGradLpPulled);
   if (postGradPulls.length > 0) {
-    raw -= Math.min(postGradPulls.length * 20, 50);
+    const pullPenalty = postGradPulls.reduce((a, l) => a + 20 * (l.decayWeight ?? 1) * launches.length, 0);
+    raw -= Math.min(Math.round(pullPenalty), 50);
     signals.push(`Post-graduation LP pulled on ${postGradPulls.length} launch(es)`);
-    const quickPulls = postGradPulls.filter(
-      (l) => l.postGradLpPulledHours !== null && l.postGradLpPulledHours < 48
-    );
+    const quickPulls = postGradPulls.filter((l) => l.postGradLpPulledHours !== null && l.postGradLpPulledHours < 48);
     if (quickPulls.length > 0) {
       raw -= quickPulls.length * 10;
       signals.push(`${quickPulls.length} LP pull(s) within 48h of graduation`);
-      flags.push({
-        severity: "CRITICAL",
-        code: "POST_GRAD_LP_PULL",
-        description: `Pulled Raydium LP within 48h of graduation on ${quickPulls.length} token(s)`,
-      });
+      flags.push({ severity: "CRITICAL", code: "POST_GRAD_LP_PULL", description: `Pulled Raydium LP within 48h of graduation on ${quickPulls.length} token(s)` });
     } else {
-      flags.push({
-        severity: "HIGH",
-        code: "RAYDIUM_LP_PULL",
-        description: `Pulled Raydium liquidity on ${postGradPulls.length} graduated token(s)`,
-      });
+      flags.push({ severity: "HIGH", code: "RAYDIUM_LP_PULL", description: `Pulled Raydium liquidity on ${postGradPulls.length} graduated token(s)` });
     }
   }
 
-  // ── Dev allocation at launch ──
-  const avgDevAlloc =
-    launches.reduce((a, l) => a + l.devAllocationPct, 0) / launches.length;
-  if (avgDevAlloc <= 3) {
-    raw += 10;
-    signals.push(`Low dev allocation: avg ${avgDevAlloc.toFixed(1)}% at launch`);
-  } else if (avgDevAlloc <= 8) {
-    raw += 5;
-    signals.push(`Moderate dev allocation: avg ${avgDevAlloc.toFixed(1)}%`);
-  } else if (avgDevAlloc > 15) {
+  // Dev allocation
+  const avgDevAlloc = launches.reduce((a, l) => a + l.devAllocationPct, 0) / launches.length;
+  if (avgDevAlloc <= 3)       { raw += 10; signals.push(`Low dev allocation: avg ${avgDevAlloc.toFixed(1)}%`); }
+  else if (avgDevAlloc <= 8)  { raw += 5;  signals.push(`Moderate dev allocation: avg ${avgDevAlloc.toFixed(1)}%`); }
+  else if (avgDevAlloc > 15)  {
     raw -= 15;
     signals.push(`High dev allocation: avg ${avgDevAlloc.toFixed(1)}% at launch`);
-    flags.push({
-      severity: "HIGH",
-      code: "HIGH_DEV_ALLOC",
-      description: `Dev holds avg ${avgDevAlloc.toFixed(1)}% of supply at launch`,
-    });
+    flags.push({ severity: "HIGH", code: "HIGH_DEV_ALLOC", description: `Dev holds avg ${avgDevAlloc.toFixed(1)}% of supply at launch` });
   } else {
     signals.push(`Dev allocation: avg ${avgDevAlloc.toFixed(1)}%`);
   }
 
-  // ── Dev sell timing ──
-  const sellTimes = launches
-    .filter((l) => l.devFirstSellHours !== null)
-    .map((l) => l.devFirstSellHours as number);
-
+  // Dev sell timing (decay-weighted)
+  const sellTimes = launches.filter((l) => l.devFirstSellHours !== null).map((l) => l.devFirstSellHours as number);
   if (sellTimes.length > 0) {
     const avgSellHours = sellTimes.reduce((a, h) => a + h, 0) / sellTimes.length;
-    if (avgSellHours >= 48) {
-      raw += 10;
-      signals.push(`Dev held avg ${formatHours(avgSellHours)} before first sell`);
-    } else if (avgSellHours >= 8) {
-      raw += 5;
-      signals.push(`Dev held avg ${formatHours(avgSellHours)} before first sell`);
-    } else if (avgSellHours < 1) {
+    if (avgSellHours >= 48)    { raw += 10; signals.push(`Dev held avg ${formatHours(avgSellHours)} before first sell`); }
+    else if (avgSellHours >= 8){ raw += 5;  signals.push(`Dev held avg ${formatHours(avgSellHours)} before first sell`); }
+    else if (avgSellHours < 1) {
       raw -= 15;
       signals.push(`Dev sold within 1h on most launches`);
-      flags.push({
-        severity: "HIGH",
-        code: "FAST_DEV_SELL",
-        description: `Dev wallet sold within 1 hour of launch on average`,
-      });
+      flags.push({ severity: "HIGH", code: "FAST_DEV_SELL", description: `Dev wallet sold within 1 hour of launch on average` });
     } else {
       signals.push(`Dev first sell: avg ${formatHours(avgSellHours)} after launch`);
     }
@@ -288,37 +241,67 @@ export function scoreLiquidityBehavior(
   return { raw, weighted: raw * 0.25, weight: 0.25, signals };
 }
 
-// ── 3. Holder Retention (20%) ─────────────────────────────────
+// ── 3. Holder Retention (20%) — with Gini coefficient ────────
 
 export function scoreHolderRetention(
   launches: TokenLaunch[],
-  flags: ScoreFlag[]
+  flags: ScoreFlag[],
+  giniScores: number[] = []
 ): ComponentScore {
   const signals: string[] = [];
 
   if (launches.length === 0) {
-    return {
-      raw: 40,
-      weighted: 40 * 0.2,
-      weight: 0.2,
-      signals: ["No launches to evaluate"],
-    };
+    return { raw: 40, weighted: 40 * 0.2, weight: 0.2, signals: ["No launches to evaluate"] };
   }
 
   let raw = 50;
 
-  // Only score retention on tokens that survived long enough to measure
+  // ── Gini coefficient — holder concentration (improvement #4) ──
+  // Low Gini = holders well distributed = healthy community
+  // High Gini = whales dominate = dump risk
+  if (giniScores.length > 0) {
+    const avgGini = giniScores.reduce((a, b) => a + b, 0) / giniScores.length;
+    if (avgGini < 0.5) {
+      raw += 15;
+      signals.push(`Healthy holder distribution (Gini: ${avgGini.toFixed(2)})`);
+    } else if (avgGini < 0.7) {
+      raw += 5;
+      signals.push(`Moderate holder concentration (Gini: ${avgGini.toFixed(2)})`);
+    } else if (avgGini < 0.85) {
+      raw -= 10;
+      signals.push(`High holder concentration (Gini: ${avgGini.toFixed(2)})`);
+      flags.push({
+        severity: "MEDIUM",
+        code: "HIGH_HOLDER_CONCENTRATION",
+        description: `Top wallets hold a disproportionate share — Gini coefficient ${avgGini.toFixed(2)}`,
+      });
+    } else {
+      raw -= 25;
+      signals.push(`Extreme whale concentration (Gini: ${avgGini.toFixed(2)})`);
+      flags.push({
+        severity: "HIGH",
+        code: "WHALE_CONCENTRATION",
+        description: `Extreme holder concentration detected — Gini ${avgGini.toFixed(2)} — dump risk very high`,
+      });
+    }
+  }
+
+  // ── Standard 7d/30d retention (decay-weighted) ──
   const measurable7d  = launches.filter((l) => l.survivedHours >= 168 && l.peakHolders > 0);
   const measurable30d = launches.filter((l) => l.survivedHours >= 720 && l.peakHolders > 0);
 
   if (measurable7d.length > 0) {
-    const retention7d =
-      measurable7d.reduce((a, l) => a + l.holders7d / Math.max(l.peakHolders, 1), 0) /
-      measurable7d.length;
+    // Weight retention by decay — recent tokens' retention matters more
+    const weightedRetention7d = measurable7d.reduce((a, l) => {
+      const ret = l.holders7d / Math.max(l.peakHolders, 1);
+      return a + ret * (l.decayWeight ?? 1);
+    }, 0);
+    const totalW = measurable7d.reduce((a, l) => a + (l.decayWeight ?? 1), 0);
+    const retention7d = weightedRetention7d / Math.max(totalW, 1);
 
-    if (retention7d >= 0.5)      { raw += 20; signals.push(`Strong 7d retention: ${pct(retention7d)}`); }
-    else if (retention7d >= 0.25){ raw += 10; signals.push(`Moderate 7d retention: ${pct(retention7d)}`); }
-    else if (retention7d < 0.1)  {
+    if (retention7d >= 0.5)       { raw += 20; signals.push(`Strong 7d retention: ${pct(retention7d)}`); }
+    else if (retention7d >= 0.25) { raw += 10; signals.push(`Moderate 7d retention: ${pct(retention7d)}`); }
+    else if (retention7d < 0.1)   {
       raw -= 15;
       signals.push(`Poor 7d retention: ${pct(retention7d)}`);
       flags.push({ severity: "HIGH", code: "LOW_7D_RETENTION", description: "Avg 7-day holder retention below 10%" });
@@ -326,13 +309,15 @@ export function scoreHolderRetention(
       signals.push(`7d retention: ${pct(retention7d)}`);
     }
   } else {
-    signals.push("Insufficient data for 7d retention (need tokens surviving 7d+)");
+    signals.push("Insufficient data for 7d retention");
   }
 
   if (measurable30d.length > 0) {
-    const retention30d =
-      measurable30d.reduce((a, l) => a + l.holders30d / Math.max(l.peakHolders, 1), 0) /
-      measurable30d.length;
+    const weightedRetention30d = measurable30d.reduce((a, l) => {
+      return a + (l.holders30d / Math.max(l.peakHolders, 1)) * (l.decayWeight ?? 1);
+    }, 0);
+    const totalW = measurable30d.reduce((a, l) => a + (l.decayWeight ?? 1), 0);
+    const retention30d = weightedRetention30d / Math.max(totalW, 1);
 
     if (retention30d >= 0.3)      { raw += 15; signals.push(`Strong 30d retention: ${pct(retention30d)}`); }
     else if (retention30d >= 0.1) { raw += 5;  signals.push(`Moderate 30d retention: ${pct(retention30d)}`); }
@@ -343,7 +328,7 @@ export function scoreHolderRetention(
     }
   }
 
-  // Holder cliff — sudden mass exit
+  // Holder cliff
   const cliffLaunches = launches.filter(
     (l) => l.peakHolders > 50 && l.holders7d / Math.max(l.peakHolders, 1) < 0.05
   );
@@ -353,7 +338,7 @@ export function scoreHolderRetention(
     flags.push({ severity: "HIGH", code: "HOLDER_CLIFF", description: "95%+ holder exit detected" });
   }
 
-  // Peak holder count — community signal
+  // Peak holder count
   const avgPeak = launches.reduce((a, l) => a + l.peakHolders, 0) / launches.length;
   if (avgPeak >= 500)      { raw += 10; signals.push(`Peak community: avg ${Math.round(avgPeak).toLocaleString()} holders`); }
   else if (avgPeak >= 100) { raw += 5;  signals.push(`Peak community: avg ${Math.round(avgPeak)} holders`); }
@@ -363,7 +348,7 @@ export function scoreHolderRetention(
   return { raw, weighted: raw * 0.2, weight: 0.2, signals };
 }
 
-// ── 4. Community Signals (15%) ────────────────────────────────
+// ── 4. Community Signals (15%) — with cross-token overlap ─────
 
 export function scoreCommunitySignals(
   launches: TokenLaunch[],
@@ -373,12 +358,7 @@ export function scoreCommunitySignals(
   let raw = 50;
 
   if (launches.length === 0) {
-    return {
-      raw: 40,
-      weighted: 40 * 0.15,
-      weight: 0.15,
-      signals: ["No launches to evaluate"],
-    };
+    return { raw: 40, weighted: 40 * 0.15, weight: 0.15, signals: ["No launches to evaluate"] };
   }
 
   // Telegram deletion
@@ -391,16 +371,11 @@ export function scoreCommunitySignals(
     raw -= Math.round(deleteRate * 35);
     signals.push(`Telegram deleted on ${deletedTelegrams.length}/${launches.length} launches`);
     if (deleteRate >= 0.5) {
-      flags.push({
-        severity: "HIGH",
-        code: "TELEGRAM_DELETED",
-        description: "Community channel deleted after >50% of launches",
-      });
+      flags.push({ severity: "HIGH", code: "TELEGRAM_DELETED", description: "Community channel deleted after >50% of launches" });
     }
   }
 
-  // Mint authority — pump.fun auto-renounces on graduation,
-  // but for tokens that didn't graduate this still matters
+  // Mint authority
   const renouncedMints = launches.filter((l) => l.mintRenounced);
   if (renouncedMints.length === launches.length) {
     raw += 15;
@@ -409,19 +384,12 @@ export function scoreCommunitySignals(
     raw += 7;
     signals.push(`Mint renounced on ${renouncedMints.length}/${launches.length} launches`);
   } else if (launches.filter((l) => !l.graduated).length > 0) {
-    // Only penalize if non-graduated tokens exist without renouncement
     raw -= 10;
     signals.push("Mint authority not renounced on non-graduated tokens");
-    flags.push({
-      severity: "MEDIUM",
-      code: "MINT_AUTHORITY_ACTIVE",
-      description: "Mint authority active on non-graduated tokens",
-    });
+    flags.push({ severity: "MEDIUM", code: "MINT_AUTHORITY_ACTIVE", description: "Mint authority active on non-graduated tokens" });
   }
 
   // Freeze authority
-  // Active freeze authority is NOT a red flag for meme coins.
-  // Revoking it is a small positive (extra trustlessness) but keeping it is neutral.
   const frozenRevoked = launches.filter((l) => l.freezeAuthorityRevoked);
   if (frozenRevoked.length === launches.length && launches.length > 0) {
     raw += 8;
@@ -437,13 +405,14 @@ export function scoreCommunitySignals(
   return { raw, weighted: raw * 0.15, weight: 0.15, signals };
 }
 
-// ── 5. Wallet History (10%) ───────────────────────────────────
+// ── 5. Wallet History (10%) — with deep cluster analysis ──────
 
 export function scoreWalletHistory(
   walletAgeDays: number,
   totalVolumeSol: number,
   totalTxns: number,
   linkedWallets: string[],
+  clusterAnalysis: { riskScore: number; clusterSize: number; signals: string[] },
   flags: ScoreFlag[]
 ): ComponentScore {
   const signals: string[] = [];
@@ -460,23 +429,41 @@ export function scoreWalletHistory(
     signals.push(`Wallet age: ${walletAgeDays}d`);
   }
 
-  // Tx count — consistency signal
-  if (totalTxns >= 1000)      { raw += 10; signals.push(`${totalTxns.toLocaleString()} lifetime txns`); }
-  else if (totalTxns >= 100)  { raw += 5;  signals.push(`${totalTxns.toLocaleString()} lifetime txns`); }
-  else if (totalTxns < 10)    { raw -= 10; signals.push("Very low transaction history"); }
+  // Tx count
+  if (totalTxns >= 1000)     { raw += 10; signals.push(`${totalTxns.toLocaleString()} lifetime txns`); }
+  else if (totalTxns >= 100) { raw += 5;  signals.push(`${totalTxns.toLocaleString()} lifetime txns`); }
+  else if (totalTxns < 10)   { raw -= 10; signals.push("Very low transaction history"); }
 
   // Volume
-  if (totalVolumeSol >= 1000) { raw += 10; signals.push(`${totalVolumeSol.toLocaleString()} SOL lifetime volume`); }
-  else if (totalVolumeSol >= 100) { raw += 5; }
+  if (totalVolumeSol >= 1000)    { raw += 10; signals.push(`${totalVolumeSol.toLocaleString()} SOL lifetime volume`); }
+  else if (totalVolumeSol >= 100){ raw += 5; }
 
-  // Linked wallet cluster — sybil / multi-wallet signal
-  if (linkedWallets.length >= 5) {
-    raw -= 15;
-    signals.push(`${linkedWallets.length} linked funding wallets`);
+  // ── Deep cluster analysis (improvement #2) ──
+  // Surface the cluster signals from the orchestrator
+  for (const sig of clusterAnalysis.signals) {
+    signals.push(sig);
+  }
+
+  if (clusterAnalysis.riskScore >= 80) {
+    raw -= 30;
+    flags.push({
+      severity: "HIGH",
+      code: "SYBIL_CLUSTER_HIGH",
+      description: `Large coordinated wallet cluster detected (${clusterAnalysis.clusterSize} linked wallets across 2 hops)`,
+    });
+  } else if (clusterAnalysis.riskScore >= 50) {
+    raw -= 20;
     flags.push({
       severity: "MEDIUM",
+      code: "SYBIL_CLUSTER_MEDIUM",
+      description: `Medium wallet cluster detected (${clusterAnalysis.clusterSize} linked wallets) — possible multi-wallet operation`,
+    });
+  } else if (clusterAnalysis.riskScore >= 25) {
+    raw -= 10;
+    flags.push({
+      severity: "LOW",
       code: "MULTI_WALLET_CLUSTER",
-      description: `Wallet funded by ${linkedWallets.length} wallets — possible multi-wallet operation`,
+      description: `${clusterAnalysis.clusterSize} linked funding wallets detected`,
     });
   }
 
@@ -495,9 +482,10 @@ function pct(n: number): string {
 }
 
 function formatHours(hours: number): string {
-  if (hours < 1)    return `${Math.round(hours * 60)}m`;
-  if (hours < 24)   return `${Math.round(hours)}h`;
-  if (hours < 168)  return `${(hours / 24).toFixed(1)}d`;
+  if (hours < 1)   return `${Math.round(hours * 60)}m`;
+  if (hours < 24)  return `${Math.round(hours)}h`;
+  if (hours < 168) return `${(hours / 24).toFixed(1)}d`;
   return `${(hours / 168).toFixed(1)}w`;
 }
+
 
