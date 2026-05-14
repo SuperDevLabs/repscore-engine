@@ -24,7 +24,14 @@ app.use(cors({
     'http://localhost:3000'
   ],
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'x-api-key',
+    'x-visitor-id',
+    'x-fingerprint',
+    'x-internal-secret'
+  ]
 }));
 
 // ── Rate limiting ─────────────────────────────────────────────
