@@ -12,6 +12,13 @@ import { ScoreResponse, BatchScoreResponse } from "../types/index.ts";
 import { webhookRouter } from "./webhook.ts";
 import { sendScoreChangeAlert, sendVerificationEmail } from "../email.js";
 
+// ── Auth imports ──────────────────────────────────────────────
+import nacl from "tweetnacl";
+import bs58 from "bs58";
+import { PublicKey } from "@solana/web3.js";
+import jwt from "jsonwebtoken";
+import crypto from "crypto";
+
 const app = express();
 app.use(express.json());
 
@@ -78,6 +85,7 @@ function isValidSolanaAddress(addr: string): boolean {
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+const JWT_SECRET   = process.env.JWT_SECRET || 'change-me-in-production';
 
 async function logToSupabase(data: {
   wallet: string;
@@ -146,7 +154,6 @@ async function logScoreSnapshot(wallet: string, score: any) {
     console.warn('[Supabase] Snapshot error:', err.message);
   }
 }
-
 
 // ── Leaderboard upsert ────────────────────────────────────────
 
@@ -304,6 +311,140 @@ app.post("/v1/score/:wallet/refresh", requireApiKey, async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+
+// ── Auth routes ───────────────────────────────────────────────
+
+// POST /v1/auth/nonce — issue a one-time nonce for wallet signing
+app.post("/v1/auth/nonce", async (req, res) => {
+  const { wallet } = req.body;
+  if (!wallet) {
+    res.status(400).json({ error: "wallet required" });
+    return;
+  }
+  try { new PublicKey(wallet); } catch {
+    res.status(400).json({ error: "invalid wallet address" });
+    return;
+  }
+  const nonce   = crypto.randomBytes(16).toString("hex");
+  const expires = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/auth_nonces`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Prefer": "resolution=merge-duplicates",
+    },
+    body: JSON.stringify({ wallet, nonce, expires }),
+  });
+  if (!r.ok) {
+    res.status(500).json({ error: "failed to store nonce" });
+    return;
+  }
+  res.json({ nonce });
+});
+
+// POST /v1/auth/verify — verify wallet signature, return JWT
+app.post("/v1/auth/verify", async (req, res) => {
+  const { wallet, signature, nonce } = req.body;
+  if (!wallet || !signature || !nonce) {
+    res.status(400).json({ error: "wallet, signature and nonce required" });
+    return;
+  }
+  // 1. Fetch nonce from DB
+  const nr = await fetch(
+    `${SUPABASE_URL}/rest/v1/auth_nonces?wallet=eq.${wallet}&nonce=eq.${nonce}&limit=1`,
+    { headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` } }
+  );
+  const nonceRows = await nr.json();
+  if (!nonceRows?.length) {
+    res.status(401).json({ error: "invalid or expired nonce" });
+    return;
+  }
+  if (new Date(nonceRows[0].expires) < new Date()) {
+    res.status(401).json({ error: "nonce expired — please reconnect" });
+    return;
+  }
+  // 2. Reconstruct the exact message that was signed on the frontend
+  const message = `RepScore authentication\nWallet: ${wallet}\nNonce: ${nonce}\n\nThis request will not trigger a blockchain transaction or cost any gas fees.`;
+  const messageBytes = new TextEncoder().encode(message);
+  // 3. Decode signature from base58
+  let sigBytes: Uint8Array;
+  try { sigBytes = bs58.decode(signature); } catch {
+    res.status(400).json({ error: "invalid signature format" });
+    return;
+  }
+  // 4. Verify signature against wallet public key
+  const valid = nacl.sign.detached.verify(
+    messageBytes,
+    sigBytes,
+    new PublicKey(wallet).toBytes()
+  );
+  if (!valid) {
+    res.status(401).json({ error: "signature verification failed" });
+    return;
+  }
+  // 5. Delete nonce — one-time use only
+  await fetch(`${SUPABASE_URL}/rest/v1/auth_nonces?wallet=eq.${wallet}`, {
+    method: "DELETE",
+    headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${SUPABASE_KEY}` },
+  });
+  // 6. Upsert session row
+  await fetch(`${SUPABASE_URL}/rest/v1/wallet_sessions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Prefer": "resolution=merge-duplicates",
+    },
+    body: JSON.stringify({ wallet, provider: "wallet", last_seen: new Date().toISOString() }),
+  });
+  // 7. Issue JWT
+  const token = jwt.sign({ wallet, provider: "wallet" }, JWT_SECRET, { expiresIn: "7d" });
+  console.log(`[Auth] ✓ Wallet connected: ${wallet.slice(0, 8)}...`);
+  res.json({ token });
+});
+
+// POST /v1/auth/email — email session (no signature needed)
+app.post("/v1/auth/email", async (req, res) => {
+  const { email } = req.body;
+  if (!email || !email.includes("@")) {
+    res.status(400).json({ error: "valid email required" });
+    return;
+  }
+  const normalised = email.toLowerCase().trim();
+  await fetch(`${SUPABASE_URL}/rest/v1/wallet_sessions`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`,
+      "Prefer": "resolution=merge-duplicates",
+    },
+    body: JSON.stringify({ wallet: normalised, provider: "email", last_seen: new Date().toISOString() }),
+  });
+  const token = jwt.sign({ wallet: normalised, provider: "email" }, JWT_SECRET, { expiresIn: "7d" });
+  console.log(`[Auth] ✓ Email session: ${normalised}`);
+  res.json({ token });
+});
+
+// ── Auth middleware — attach to any route that needs a logged-in user ────────
+function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const header = req.headers.authorization || "";
+  if (!header.startsWith("Bearer ")) {
+    res.status(401).json({ error: "missing authorization header" });
+    return;
+  }
+  try {
+    const payload = jwt.verify(header.slice(7), JWT_SECRET) as any;
+    (req as any).auth = { wallet: payload.wallet, provider: payload.provider };
+    next();
+  } catch (err: any) {
+    const msg = err.name === "TokenExpiredError" ? "session expired" : "invalid token";
+    res.status(401).json({ error: msg });
+  }
+}
 
 // ── Webhook routes ────────────────────────────────────────────
 
@@ -869,7 +1010,7 @@ async function updateWatchlistScore(email: string, wallet: string, score: any) {
   } catch {}
 }
 
-// Helper — check watchlist for score changes and update
+// Helper — check watchlist for score changes and alert
 async function checkWatchlistChanges(wallet: string, newScore: any) {
   if (!SUPABASE_URL || !SUPABASE_KEY) return;
   try {
@@ -891,9 +1032,7 @@ async function checkWatchlistChanges(wallet: string, newScore: any) {
       const minChange = watcher.min_change || 50;
 
       if (change >= minChange) {
-        // Score changed significantly — log it (email sending requires email service)
         console.log(`[Watchlist] Alert: ${wallet.slice(0,8)}... score changed ${watcher.last_score} → ${newScore.score} for ${watcher.email}`);
-        // Send email alert
         try {
           await sendScoreChangeAlert(
             watcher.email,
@@ -906,10 +1045,8 @@ async function checkWatchlistChanges(wallet: string, newScore: any) {
         } catch (emailErr: any) {
           console.warn('[Email] Alert failed:', emailErr.message);
         }
-        // Update score
         await updateWatchlistScore(watcher.email, wallet, newScore);
       } else {
-        // Small change — just update silently
         await updateWatchlistScore(watcher.email, wallet, newScore);
       }
     }
@@ -917,6 +1054,7 @@ async function checkWatchlistChanges(wallet: string, newScore: any) {
     console.warn('[Watchlist] Check failed:', err.message);
   }
 }
+
 // ── Legacy route aliases (for repscore.xyz frontend) ─────────
 // Frontend calls /score/:wallet — redirect to /v1/score/:wallet
 
@@ -957,6 +1095,7 @@ app.listen(PORT, () => {
   console.log(`[RepScore API] Running on port ${PORT}`);
   console.log(`[RepScore API] Helius key: ${process.env.HELIUS_API_KEY ? "✓" : "✗ MISSING"}`);
   console.log(`[RepScore API] Redis: ${process.env.REDIS_URL ? "✓" : "not configured (using memory)"}`);
+  console.log(`[RepScore API] JWT: ${process.env.JWT_SECRET ? "✓" : "✗ using default (set JWT_SECRET in env)"}`);
 });
 
 export default app;
